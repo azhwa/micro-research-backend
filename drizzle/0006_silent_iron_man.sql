@@ -1,0 +1,1 @@
+ALTER TABLE `search_queries` ADD `is_complete` integer DEFAULT false NOT NULL;
