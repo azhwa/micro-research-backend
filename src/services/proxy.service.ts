@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import { chromium } from "playwright";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { proxyEndpoints } from "../db/schema";
 import { env } from "../config/env";
@@ -161,7 +161,10 @@ export async function selectProxyForResearch() {
   const [row] = await getDatabase()
     .select()
     .from(proxyEndpoints)
-    .where(eq(proxyEndpoints.status, "active"))
+    .where(and(
+      eq(proxyEndpoints.status, "active"),
+      eq(proxyEndpoints.lastTestOk, true)
+    ))
     .orderBy(asc(proxyEndpoints.lastUsedAt), asc(proxyEndpoints.createdAt))
     .limit(1);
   if (!row) return null;

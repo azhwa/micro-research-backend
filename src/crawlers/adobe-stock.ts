@@ -47,8 +47,9 @@ function chunks<T>(rows: T[], size = BATCH_SIZE): T[][] {
   return result;
 }
 
-function searchUrl(query: string, assetType: string, sortMode?: SortMode): string {
-  const path = assetType === "videos" ? "/search/video" : "/search/images";
+function searchUrl(query: string, assetType: string, sortMode?: SortMode, locale?: string): string {
+  const localePrefix = locale?.toLowerCase().startsWith("id") ? "/id" : "";
+  const path = localePrefix + (assetType === "videos" ? "/search/video" : "/search/images");
   const url = new URL(path, "https://stock.adobe.com");
   url.searchParams.set("k", query);
   url.searchParams.set("limit", "100");
@@ -160,7 +161,8 @@ async function collectSuggestions(
   researchRunId: string,
   seed: string,
   max: number,
-  maxPrefixes: number
+  maxPrefixes: number,
+  selectorTimeout: number
 ) {
   const prefixes = [
     `${seed} `,
@@ -173,7 +175,7 @@ async function collectSuggestions(
 
   for (const [index, prefix] of prefixes.entries()) {
     try {
-      await input.fill(prefix);
+      await input.fill(prefix, { timeout: selectorTimeout });
       await page.waitForTimeout(650);
       const values = await page.locator(".js-search-autocomplete-panel li").allTextContents();
 
@@ -198,20 +200,24 @@ async function collectSuggestions(
       const failureType = classifyFailure(error, diagnostics);
       await appendResearchEvent(
         researchRunId,
-        "error",
+        "warning",
         "suggestions_failed",
         `Autocomplete gagal pada percobaan ${index + 1}/${prefixes.length} [${failureType}]`,
         { prefix, ...diagnosticMetadata(error, diagnostics, failureType) }
       );
-      throw new CrawlerStageError(
-        `Autocomplete gagal [${failureType}]: ${errorMessage(error)}`,
-        failureType
-      );
+      break;
     }
   }
 
   if (collected.length === 0) {
     collected.push({ baseKeyword: seed, suggestion: seed, position: 1 });
+    await appendResearchEvent(
+      researchRunId,
+      "info",
+      "suggestions_fallback",
+      "Autocomplete tidak tersedia; seed keyword dipakai untuk melanjutkan research",
+      { seedKeyword: seed }
+    );
   }
 
   return collected;
@@ -221,12 +227,13 @@ async function collectSearchResults(
   page: Page,
   query: string,
   assetType: string,
+  locale: string,
   sortMode: SortMode,
   limit: number,
   navigationTimeout: number,
   selectorTimeout: number
 ) {
-  const response = await page.goto(searchUrl(query, assetType, sortMode), {
+  const response = await page.goto(searchUrl(query, assetType, sortMode, locale), {
     waitUntil: "domcontentloaded",
     timeout: navigationTimeout
   });
@@ -507,7 +514,7 @@ async function collectAndPersistAssetKeywords(
     const failureType = classifyFailure(error, diagnostics);
     await appendResearchEvent(
       researchRunId,
-      "warning",
+      failureType === "asset_not_found" ? "info" : "warning",
       "keyword_detail_failed",
       `Keyword detail gagal untuk asset ${item.externalId} [${failureType}]`,
       { assetId, assetUrl: item.assetUrl, ...diagnosticMetadata(error, diagnostics, failureType) }
@@ -684,7 +691,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     },
     requestHandler: async ({ page }) => {
       requestHandled = true;
-      const response = await page.goto(searchUrl(run.seedKeyword, run.assetType), {
+      const response = await page.goto(searchUrl(run.seedKeyword, run.assetType, undefined, run.locale), {
         waitUntil: "domcontentloaded",
         timeout: navigationTimeout
       });
@@ -696,23 +703,33 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           "warning",
           "search_page_diagnostic",
           `Respons pencarian Adobe tidak normal${httpStatus !== null ? ` HTTP ${httpStatus}` : ""}${diagnostics.title ? ` (${diagnostics.title})` : ""}; crawler tetap mencoba`,
-          diagnosticMetadata(new Error("Adobe search response diagnostic"), diagnostics)
+          {
+            diagnostic: "non_normal_http_response",
+            pageUrl: diagnostics.url,
+            pageTitle: diagnostics.title,
+            httpStatus: diagnostics.httpStatus,
+            botDetected: diagnostics.botDetected,
+            bodyPreview: diagnostics.bodyPreview
+          }
         );
       }
-      await appendResearchEvent(
-        researchRunId,
-        "info",
-        "search_page_opened",
-        "Halaman pencarian Adobe Stock dibuka",
-        { assetType: run.assetType, locale: run.locale }
-      );
+      if (!diagnostics.botDetected && (httpStatus === null || httpStatus < 400)) {
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "search_page_opened",
+          "Halaman pencarian Adobe Stock dibuka",
+          { assetType: run.assetType, locale: run.locale }
+        );
+      }
 
       const suggestionRows = await collectSuggestions(
         page,
         researchRunId,
         run.seedKeyword,
         run.maxSuggestions,
-        autocompletePrefixLimit
+        autocompletePrefixLimit,
+        selectorTimeout
       );
       await persistSuggestions(researchRunId, suggestionRows, run.locale);
       await appendResearchEvent(
@@ -795,6 +812,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
               page,
               suggestion.suggestion,
               run.assetType,
+              run.locale,
               sortMode,
               run.assetsPerQuery,
               navigationTimeout,
@@ -848,7 +866,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     }
   });
 
-  const startUrl = searchUrl(run.seedKeyword, run.assetType);
+  const startUrl = searchUrl(run.seedKeyword, run.assetType, undefined, run.locale);
   try {
   await crawler.run([
     {
