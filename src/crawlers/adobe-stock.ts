@@ -16,6 +16,11 @@ import {
   makeStableId,
   type ResearchMode
 } from "../services/research.service";
+import {
+  markProxyFailure,
+  markProxySuccess,
+  selectProxyForResearch
+} from "../services/proxy.service";
 
 type SortMode = "downloads" | "relevance" | "recent";
 
@@ -654,6 +659,23 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
   let requestHandled = false;
   let requestSucceeded = false;
+  const selectedProxy = await selectProxyForResearch();
+  if (selectedProxy) {
+    await appendResearchEvent(
+      researchRunId,
+      "info",
+      "proxy_selected",
+      "Proxy dipilih: " + selectedProxy.displayUrl,
+      { proxyId: selectedProxy.id, proxy: selectedProxy.displayUrl }
+    );
+  } else {
+    await appendResearchEvent(
+      researchRunId,
+      "warning",
+      "proxy_direct_connection",
+      "Tidak ada proxy aktif; crawler memakai koneksi langsung VPS"
+    );
+  }
 
   const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
@@ -663,7 +685,8 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     launchContext: {
       launchOptions: {
         headless: true,
-        args: ["--disable-dev-shm-usage", "--disable-gpu"]
+        args: ["--disable-dev-shm-usage", "--disable-gpu"],
+        ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
       }
     },
     failedRequestHandler: async ({ request, error }) => {
@@ -855,6 +878,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   });
 
   const startUrl = searchUrl(run.seedKeyword, run.assetType);
+  try {
   await crawler.run([
     {
       url: startUrl,
@@ -864,5 +888,15 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
   if (!requestHandled || !requestSucceeded) {
     throw new Error("Crawler gagal menyelesaikan request Adobe Stock");
+  }
+    if (selectedProxy) await markProxySuccess(selectedProxy.id);
+  } catch (error) {
+    if (selectedProxy) {
+      await markProxyFailure(
+        selectedProxy.id,
+        error instanceof Error ? error.message : "Crawler gagal melalui proxy",
+      );
+    }
+    throw error;
   }
 }

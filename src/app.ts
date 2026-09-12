@@ -11,6 +11,7 @@ import { aiRoutes } from "./routes/ai";
 import { authRoutes } from "./routes/auth";
 import { researchRoutes } from "./routes/research";
 import { geminiRoutes } from "./routes/gemini";
+import { proxyRoutes } from "./routes/proxies";
 import { authenticateRequest } from "./auth";
 import { clerkConfigured, env } from "./config/env";
 
@@ -56,6 +57,7 @@ export function buildApp() {
   app.register(authRoutes);
   app.register(researchRoutes);
   app.register(geminiRoutes);
+  app.register(proxyRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(

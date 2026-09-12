@@ -328,3 +328,26 @@ export const geminiApiKeys = sqliteTable(
     index("gemini_keys_status_idx").on(table.status)
   ]
 );
+
+export const proxyEndpoints = sqliteTable(
+  "proxy_endpoints",
+  {
+    id: text("id").primaryKey(),
+    createdByClerkUserId: text("created_by_clerk_user_id").notNull(),
+    label: text("label").notNull(),
+    encryptedUrl: text("encrypted_url").notNull(),
+    displayUrl: text("display_url").notNull(),
+    status: text("status").notNull().default("active"),
+    failureCount: integer("failure_count").notNull().default(0),
+    lastTestAt: integer("last_test_at", { mode: "timestamp_ms" }),
+    lastTestOk: integer("last_test_ok", { mode: "boolean" }),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("proxy_endpoints_status_idx").on(table.status),
+    index("proxy_endpoints_last_used_idx").on(table.lastUsedAt)
+  ]
+);

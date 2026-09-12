@@ -71,6 +71,13 @@
       "when": 1789227948443,
       "tag": "0009_free_firestar",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789229574566,
+      "tag": "0010_tense_spot",
+      "breakpoints": true
     }
   ]
 }
