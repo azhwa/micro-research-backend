@@ -234,3 +234,34 @@ export async function testProxyEndpoint(id: string) {
     await browser?.close().catch(() => undefined);
   }
 }
+
+export async function validateAndRemoveInvalidProxies() {
+  const rows = await getDatabase()
+    .select()
+    .from(proxyEndpoints)
+    .where(eq(proxyEndpoints.status, "active"))
+    .orderBy(asc(proxyEndpoints.createdAt));
+  const removed: Array<{ id: string; label: string; reason: string }> = [];
+  let validCount = 0;
+
+  for (const row of rows) {
+    const result = await testProxyEndpoint(row.id);
+    if (result?.ok) {
+      validCount += 1;
+      continue;
+    }
+    await deleteProxyEndpoint(row.id);
+    removed.push({
+      id: row.id,
+      label: row.label,
+      reason: result?.message ?? "Proxy test gagal"
+    });
+  }
+
+  return {
+    checked: rows.length,
+    validCount,
+    removedCount: removed.length,
+    removed
+  };
+}

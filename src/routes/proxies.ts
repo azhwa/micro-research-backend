@@ -5,7 +5,8 @@ import {
   deleteProxyEndpoint,
   listProxyEndpoints,
   setProxyEndpointStatus,
-  testProxyEndpoint
+  testProxyEndpoint,
+  validateAndRemoveInvalidProxies
 } from "../services/proxy.service";
 
 interface CreateProxyBody {
@@ -19,6 +20,12 @@ interface StatusBody {
 
 export async function proxyRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/proxies", { preHandler: requireAdmin }, async () => listProxyEndpoints());
+
+  app.post(
+    "/api/proxies/validate-all",
+    { preHandler: requireAdmin },
+    async () => validateAndRemoveInvalidProxies()
+  );
 
   app.post<{ Body: CreateProxyBody }>(
     "/api/proxies",
