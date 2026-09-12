@@ -1,0 +1,1 @@
+ALTER TABLE `research_runs` ADD `mode` text DEFAULT 'full' NOT NULL;

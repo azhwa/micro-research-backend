@@ -17,6 +17,7 @@ import { getDatabase } from "../db/client";
 import type { AuthContext } from "../auth";
 
 export type AssetType = "images" | "videos";
+export type ResearchMode = "fast" | "full";
 
 export interface CreateResearchInput {
   keyword: string;
@@ -27,6 +28,7 @@ export interface CreateResearchInput {
   locale: string;
   maxSuggestions: number;
   assetsPerQuery: number;
+  mode: ResearchMode;
 }
 
 function stableId(...parts: string[]): string {
@@ -51,6 +53,7 @@ export async function createResearchRun(input: CreateResearchInput) {
     locale: input.locale,
     maxSuggestions: input.maxSuggestions,
     assetsPerQuery: input.assetsPerQuery,
+    mode: input.mode,
     status: "pending"
   });
 

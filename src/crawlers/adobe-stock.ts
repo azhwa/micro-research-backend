@@ -1,6 +1,6 @@
 import { PlaywrightCrawler } from "crawlee";
 import type { Page } from "playwright";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import {
   assetObservations,
@@ -13,7 +13,8 @@ import {
 import {
   appendResearchEvent,
   getResearchRun,
-  makeStableId
+  makeStableId,
+  type ResearchMode
 } from "../services/research.service";
 
 type SortMode = "downloads" | "relevance" | "recent";
@@ -30,6 +31,16 @@ interface CollectedAsset {
 }
 
 const SORT_MODES: SortMode[] = ["downloads", "relevance", "recent"];
+const FAST_SORT_MODES: SortMode[] = ["downloads"];
+const BATCH_SIZE = 25;
+
+function chunks<T>(rows: T[], size = BATCH_SIZE): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < rows.length; index += size) {
+    result.push(rows.slice(index, index + size));
+  }
+  return result;
+}
 
 function searchUrl(query: string, assetType: string, sortMode?: SortMode): string {
   const path = assetType === "videos" ? "/search/video" : "/search/images";
@@ -140,12 +151,13 @@ async function collectSuggestions(
   page: Page,
   researchRunId: string,
   seed: string,
-  max: number
+  max: number,
+  maxPrefixes: number
 ) {
   const prefixes = [
     `${seed} `,
     ...Array.from({ length: 26 }, (_, index) => `${seed} ${String.fromCharCode(97 + index)}`)
-  ];
+  ].slice(0, maxPrefixes);
   const collected: Array<{ baseKeyword: string; suggestion: string; position: number }> = [];
   const seen = new Set<string>();
 
@@ -202,11 +214,13 @@ async function collectSearchResults(
   query: string,
   assetType: string,
   sortMode: SortMode,
-  limit: number
+  limit: number,
+  navigationTimeout: number,
+  selectorTimeout: number
 ) {
   const response = await page.goto(searchUrl(query, assetType, sortMode), {
     waitUntil: "domcontentloaded",
-    timeout: 30_000
+    timeout: navigationTimeout
   });
   const httpStatus = response?.status() ?? null;
   if (httpStatus !== null && httpStatus >= 400) {
@@ -219,7 +233,7 @@ async function collectSearchResults(
 
   const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
   const selectorFound = await page
-    .waitForSelector(resultSelector, { timeout: 15_000 })
+    .waitForSelector(resultSelector, { timeout: selectorTimeout })
     .then(() => true)
     .catch(() => false);
 
@@ -307,20 +321,18 @@ async function persistSuggestions(
   locale: string
 ) {
   const database = getDatabase();
+  const values = rows.map((row) => ({
+    id: makeStableId("suggestion", researchRunId, row.suggestion),
+    researchRunId,
+    baseKeyword: row.baseKeyword,
+    suggestion: row.suggestion,
+    position: row.position,
+    source: "autocomplete",
+    locale
+  }));
 
-  for (const row of rows) {
-    await database
-      .insert(suggestions)
-      .values({
-        id: makeStableId("suggestion", researchRunId, row.suggestion),
-        researchRunId,
-        baseKeyword: row.baseKeyword,
-        suggestion: row.suggestion,
-        position: row.position,
-        source: "autocomplete",
-        locale
-      })
-      .onConflictDoNothing();
+  for (const batch of chunks(values)) {
+    await database.insert(suggestions).values(batch).onConflictDoNothing();
   }
 }
 
@@ -359,49 +371,53 @@ async function persistSearch(
       set: { resultCount, isComplete: false, observedAt: new Date() }
     });
 
-  for (const [index, item] of collectedAssets.entries()) {
+  const assetValues = collectedAssets.map((item) => {
     const assetId = makeStableId("asset", "adobe_stock", item.externalId);
+    return {
+      id: assetId,
+      platform: "adobe_stock" as const,
+      externalId: item.externalId,
+      assetType: assetType === "videos" ? "video" : "image",
+      title: item.title,
+      assetUrl: item.assetUrl,
+      thumbnailUrl: item.thumbnailUrl,
+      width: item.width,
+      height: item.height,
+      fileExtension: item.fileExtension,
+      isPremium: item.isPremium
+    };
+  });
 
+  for (const batch of chunks(assetValues)) {
     await database
       .insert(assets)
-      .values({
-        id: assetId,
-        platform: "adobe_stock",
-        externalId: item.externalId,
-        assetType: assetType === "videos" ? "video" : "image",
-        title: item.title,
-        assetUrl: item.assetUrl,
-        thumbnailUrl: item.thumbnailUrl,
-        width: item.width,
-        height: item.height,
-        fileExtension: item.fileExtension,
-        isPremium: item.isPremium
-      })
+      .values(batch)
       .onConflictDoUpdate({
         target: assets.id,
         set: {
-          title: item.title,
-          assetUrl: item.assetUrl,
-          thumbnailUrl: item.thumbnailUrl,
-          width: item.width,
-          height: item.height,
-          fileExtension: item.fileExtension,
-          isPremium: item.isPremium,
+          title: sql`excluded.title`,
+          assetUrl: sql`excluded.asset_url`,
+          thumbnailUrl: sql`excluded.thumbnail_url`,
+          width: sql`excluded.width`,
+          height: sql`excluded.height`,
+          fileExtension: sql`excluded.file_extension`,
+          isPremium: sql`excluded.is_premium`,
           updatedAt: new Date()
         }
       });
+  }
 
-    await database
-      .insert(assetObservations)
-      .values({
-        id: makeStableId("observation", researchRunId, queryId, item.externalId, sortMode),
-        researchRunId,
-        assetId,
-        searchQueryId: queryId,
-        sortMode,
-        rank: index + 1
-      })
-      .onConflictDoNothing();
+  const observationValues = collectedAssets.map((item, index) => ({
+    id: makeStableId("observation", researchRunId, queryId, item.externalId, sortMode),
+    researchRunId,
+    assetId: makeStableId("asset", "adobe_stock", item.externalId),
+    searchQueryId: queryId,
+    sortMode,
+    rank: index + 1
+  }));
+
+  for (const batch of chunks(observationValues)) {
+    await database.insert(assetObservations).values(batch).onConflictDoNothing();
   }
 
   await database
@@ -413,7 +429,9 @@ async function persistSearch(
 async function collectAndPersistAssetKeywords(
   page: Page,
   researchRunId: string,
-  item: CollectedAsset
+  item: CollectedAsset,
+  navigationTimeout: number,
+  selectorTimeout: number
 ): Promise<"success" | "empty" | "failed"> {
   const database = getDatabase();
   const assetId = makeStableId("asset", "adobe_stock", item.externalId);
@@ -422,7 +440,7 @@ async function collectAndPersistAssetKeywords(
   try {
     const response = await page.goto(item.assetUrl, {
       waitUntil: "domcontentloaded",
-      timeout: 30_000
+      timeout: navigationTimeout
     });
     const httpStatus = response?.status() ?? null;
     responseStatus = httpStatus;
@@ -441,7 +459,7 @@ async function collectAndPersistAssetKeywords(
     }
 
     const keywordSelectorFound = await page
-      .waitForSelector('[data-t="keywords-section"]', { timeout: 15_000 })
+      .waitForSelector('[data-t="keywords-section"]', { timeout: selectorTimeout })
       .then(() => true)
       .catch(() => false);
     const diagnostics = await getPageDiagnostics(page, httpStatus);
@@ -463,26 +481,27 @@ async function collectAndPersistAssetKeywords(
         .map((keyword, index) => ({ keyword, position: index + 1 }))
     );
 
-    for (const row of keywordRows) {
+    const keywordValues = keywordRows.map((row) => {
       const normalizedKeyword = row.keyword.toLowerCase().replace(/\s+/g, " ");
-      await database
-        .insert(assetKeywords)
-        .values({
-          id: makeStableId(
-            "asset-keyword",
-            researchRunId,
-            assetId,
-            normalizedKeyword,
-            "adobe_similar_keywords"
-          ),
+      return {
+        id: makeStableId(
+          "asset-keyword",
           researchRunId,
           assetId,
-          keyword: row.keyword,
           normalizedKeyword,
-          source: "adobe_similar_keywords",
-          position: row.position
-        })
-        .onConflictDoNothing();
+          "adobe_similar_keywords"
+        ),
+        researchRunId,
+        assetId,
+        keyword: row.keyword,
+        normalizedKeyword,
+        source: "adobe_similar_keywords",
+        position: row.position
+      };
+    });
+
+    for (const batch of chunks(keywordValues)) {
+      await database.insert(assetKeywords).values(batch).onConflictDoNothing();
     }
     if (!keywordRows.length) {
       await appendResearchEvent(
@@ -622,6 +641,13 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   const run = await getResearchRun(researchRunId);
   if (!run) throw new Error("Research run tidak ditemukan");
 
+  const mode: ResearchMode = run.mode === "fast" ? "fast" : "full";
+  const sortModes = mode === "fast" ? FAST_SORT_MODES : SORT_MODES;
+  const autocompletePrefixLimit = mode === "fast" ? 5 : 27;
+  const navigationTimeout = mode === "fast" ? 20_000 : 30_000;
+  const selectorTimeout = mode === "fast" ? 8_000 : 15_000;
+  const keywordDetailLimit = mode === "fast" ? 1 : Number.POSITIVE_INFINITY;
+
   let requestHandled = false;
 
   const crawler = new PlaywrightCrawler({
@@ -652,7 +678,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       requestHandled = true;
       const response = await page.goto(searchUrl(run.seedKeyword, run.assetType), {
         waitUntil: "domcontentloaded",
-        timeout: 30_000
+        timeout: navigationTimeout
       });
       const httpStatus = response?.status() ?? null;
       const diagnostics = await getPageDiagnostics(page, httpStatus);
@@ -686,7 +712,8 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         page,
         researchRunId,
         run.seedKeyword,
-        run.maxSuggestions
+        run.maxSuggestions,
+        autocompletePrefixLimit
       );
       await persistSuggestions(researchRunId, suggestionRows, run.locale);
       await appendResearchEvent(
@@ -698,7 +725,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       );
 
       const database = getDatabase();
-      const total = suggestionRows.length * SORT_MODES.length;
+      const total = suggestionRows.length * sortModes.length;
       const resumeState = await loadResumeState(researchRunId);
       let completed = [...resumeState.completedKeys].length;
       await database
@@ -710,22 +737,35 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       let keywordSuccess = 0;
       let keywordEmpty = 0;
       let keywordFailed = 0;
+      const enrichDownloadAssets = async (items: CollectedAsset[]) => {
+        let attempted = 0;
+        for (const item of items) {
+          if (attempted >= keywordDetailLimit) break;
+          if (enrichedAssetIds.has(item.externalId)) continue;
+          enrichedAssetIds.add(item.externalId);
+          attempted += 1;
+          const status = await collectAndPersistAssetKeywords(
+            page,
+            researchRunId,
+            item,
+            navigationTimeout,
+            selectorTimeout
+          );
+          if (status === "success") keywordSuccess += 1;
+          if (status === "empty") keywordEmpty += 1;
+          if (status === "failed") keywordFailed += 1;
+        }
+        return attempted;
+      };
       for (const suggestion of suggestionRows) {
-        for (const sortMode of SORT_MODES) {
+        for (const sortMode of sortModes) {
           const latestRun = await getResearchRun(researchRunId);
           if (!latestRun || latestRun.status === "cancelled") return;
 
           const queryKey = `${suggestion.suggestion}\u001f${sortMode}`;
           if (resumeState.completedKeys.has(queryKey)) {
             if (sortMode === "downloads") {
-              for (const item of resumeState.downloadAssetsByQuery.get(suggestion.suggestion) ?? []) {
-                if (enrichedAssetIds.has(item.externalId)) continue;
-                enrichedAssetIds.add(item.externalId);
-                const status = await collectAndPersistAssetKeywords(page, researchRunId, item);
-                if (status === "success") keywordSuccess += 1;
-                if (status === "empty") keywordEmpty += 1;
-                if (status === "failed") keywordFailed += 1;
-              }
+              await enrichDownloadAssets(resumeState.downloadAssetsByQuery.get(suggestion.suggestion) ?? []);
             }
             await appendResearchEvent(
               researchRunId,
@@ -754,7 +794,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
               suggestion.suggestion,
               run.assetType,
               sortMode,
-              run.assetsPerQuery
+              run.assetsPerQuery,
+              navigationTimeout,
+              selectorTimeout
             ),
             2,
             () => getPageDiagnostics(page)
@@ -782,21 +824,15 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           );
 
           if (sortMode === "downloads") {
-            for (const item of searchResult.assets) {
-              if (enrichedAssetIds.has(item.externalId)) continue;
-              enrichedAssetIds.add(item.externalId);
-              const status = await collectAndPersistAssetKeywords(page, researchRunId, item);
-              if (status === "success") keywordSuccess += 1;
-              if (status === "empty") keywordEmpty += 1;
-              if (status === "failed") keywordFailed += 1;
-            }
+            const attempted = await enrichDownloadAssets(searchResult.assets);
             await appendResearchEvent(
               researchRunId,
               "info",
               "keyword_enrichment_finished",
               `Selesai mencoba keyword detail dari ${searchResult.assets.length} asset Downloads`,
               {
-                attempted: searchResult.assets.length,
+                attempted,
+                limit: Number.isFinite(keywordDetailLimit) ? keywordDetailLimit : null,
                 success: keywordSuccess,
                 empty: keywordEmpty,
                 failed: keywordFailed

@@ -14,7 +14,8 @@ import {
   listResearchEvents,
   getResearchRun,
   listResearchRuns,
-  type AssetType
+  type AssetType,
+  type ResearchMode
 } from "../services/research.service";
 
 interface CreateResearchBody {
@@ -24,6 +25,7 @@ interface CreateResearchBody {
   locale?: unknown;
   maxSuggestions?: unknown;
   assetsPerQuery?: unknown;
+  mode?: unknown;
 }
 
 function positiveInteger(value: unknown, fallback: number): number {
@@ -47,6 +49,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
         : "en-US";
       const maxSuggestions = positiveInteger(body.maxSuggestions, 30);
       const assetsPerQuery = positiveInteger(body.assetsPerQuery, 30);
+      const mode: ResearchMode = body.mode === "fast" ? "fast" : "full";
 
       if (!keyword || keyword.length > 120) {
         return reply.status(400).send({
@@ -70,7 +73,8 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
         assetType: assetType as AssetType,
         locale,
         maxSuggestions,
-        assetsPerQuery
+        assetsPerQuery,
+        mode
       });
 
       return reply.status(201).send(result);

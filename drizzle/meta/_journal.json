@@ -64,6 +64,13 @@
       "when": 1789214627676,
       "tag": "0008_clear_the_twelve",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789227948443,
+      "tag": "0009_free_firestar",
+      "breakpoints": true
     }
   ]
 }
