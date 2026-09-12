@@ -34,3 +34,5 @@ pm2 logs micro-research-backend
 ```
 
 `ecosystem.config.js` menggunakan satu instance fork, tanpa watch, dengan restart otomatis dan batas memory 550 MB. Batas ini hanya untuk proses aplikasi yang dipantau PM2; Chromium Playwright dan `cloudflared` tetap perlu dipantau dari total penggunaan RAM VPS. Environment rahasia tetap dibaca dari file `.env` di server dan tidak disimpan di repository.
+
+Deployment saat ini menargetkan Ubuntu 20.04, sehingga versi Playwright dikunci ke `1.62.1`. Jangan menaikkannya ke `1.63+` tanpa upgrade OS karena Playwright 1.63 menghentikan dukungan Ubuntu 20.04.
