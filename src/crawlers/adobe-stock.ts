@@ -51,7 +51,87 @@ function numberOrNull(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function collectSuggestions(page: Page, seed: string, max: number) {
+type FailureType =
+  | "bot_detected"
+  | "timeout"
+  | "selector_timeout"
+  | "navigation_error"
+  | "database_error"
+  | "unknown";
+
+interface PageDiagnostics {
+  url: string;
+  title: string;
+  botDetected: boolean;
+  bodyPreview: string;
+}
+
+class CrawlerStageError extends Error {
+  constructor(
+    message: string,
+    readonly failureType: FailureType
+  ) {
+    super(message);
+    this.name = "CrawlerStageError";
+  }
+}
+
+const BOT_MARKERS = /captcha|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked|challenge/i;
+
+async function getPageDiagnostics(page: Page): Promise<PageDiagnostics> {
+  const url = page.url();
+  const title = await page.title().catch(() => "");
+  const body = await page
+    .locator("body")
+    .innerText({ timeout: 2_000 })
+    .catch(() => "");
+  const bodyPreview = body.replace(/\s+/g, " ").trim().slice(0, 240);
+  const botDetected = BOT_MARKERS.test(`${url} ${title} ${bodyPreview}`);
+
+  return { url, title, botDetected, bodyPreview };
+}
+
+function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): FailureType {
+  if (diagnostics?.botDetected) return "bot_detected";
+  if (error instanceof CrawlerStageError) return error.failureType;
+
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  if (/timeout|timed out/i.test(text)) return "timeout";
+  if (/net::|navigation|page\.goto/i.test(text)) return "navigation_error";
+  if (/turso|sqlite|database|constraint/i.test(text)) return "database_error";
+  return "unknown";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function diagnosticMetadata(
+  error: unknown,
+  diagnostics?: PageDiagnostics,
+  failureType?: FailureType
+) {
+  return {
+    failureType: failureType ?? classifyFailure(error, diagnostics),
+    errorName: error instanceof Error ? error.name : "UnknownError",
+    errorMessage: errorMessage(error),
+    ...(diagnostics
+      ? {
+          pageUrl: diagnostics.url,
+          pageTitle: diagnostics.title,
+          botDetected: diagnostics.botDetected,
+          bodyPreview: diagnostics.bodyPreview
+        }
+      : {})
+  };
+}
+
+async function collectSuggestions(
+  page: Page,
+  researchRunId: string,
+  seed: string,
+  max: number
+) {
   const prefixes = [
     `${seed} `,
     ...Array.from({ length: 26 }, (_, index) => `${seed} ${String.fromCharCode(97 + index)}`)
@@ -61,27 +141,43 @@ async function collectSuggestions(page: Page, seed: string, max: number) {
 
   const input = page.locator('input[name="k"], input[aria-label="Search"]').first();
 
-  for (const prefix of prefixes) {
-    await input.fill(prefix);
-    await page.waitForTimeout(650);
-    const values = await page.locator(".js-search-autocomplete-panel li").allTextContents();
+  for (const [index, prefix] of prefixes.entries()) {
+    try {
+      await input.fill(prefix);
+      await page.waitForTimeout(650);
+      const values = await page.locator(".js-search-autocomplete-panel li").allTextContents();
 
-    values
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .forEach((suggestion, index) => {
-        const key = suggestion.toLowerCase();
-        if (!seen.has(key) && collected.length < max) {
-          seen.add(key);
-          collected.push({
-            baseKeyword: seed,
-            suggestion,
-            position: index + 1
-          });
-        }
-      });
+      values
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .forEach((suggestion, suggestionIndex) => {
+          const key = suggestion.toLowerCase();
+          if (!seen.has(key) && collected.length < max) {
+            seen.add(key);
+            collected.push({
+              baseKeyword: seed,
+              suggestion,
+              position: suggestionIndex + 1
+            });
+          }
+        });
 
-    if (collected.length >= max) break;
+      if (collected.length >= max) break;
+    } catch (error) {
+      const diagnostics = await getPageDiagnostics(page);
+      const failureType = classifyFailure(error, diagnostics);
+      await appendResearchEvent(
+        researchRunId,
+        "error",
+        "suggestions_failed",
+        `Autocomplete gagal pada percobaan ${index + 1}/${prefixes.length} [${failureType}]`,
+        { prefix, ...diagnosticMetadata(error, diagnostics, failureType) }
+      );
+      throw new CrawlerStageError(
+        `Autocomplete gagal [${failureType}]: ${errorMessage(error)}`,
+        failureType
+      );
+    }
   }
 
   if (collected.length === 0) {
@@ -103,12 +199,23 @@ async function collectSearchResults(
     timeout: 30_000
   });
 
-  await page
-    .waitForSelector(
-      'a.js-search-result-thumbnail[data-content-id], div[data-content-id]',
-      { timeout: 15_000 }
-    )
-    .catch(() => undefined);
+  const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
+  const selectorFound = await page
+    .waitForSelector(resultSelector, { timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!selectorFound) {
+    const diagnostics = await getPageDiagnostics(page);
+    const noResults = /no results|0 results|didn't find any/i.test(diagnostics.bodyPreview);
+    if (!noResults) {
+      throw new CrawlerStageError(
+        `Selector hasil Adobe tidak ditemukan pada ${diagnostics.url}${diagnostics.botDetected ? "; halaman terlihat seperti bot challenge" : ""}`,
+        diagnostics.botDetected ? "bot_detected" : "selector_timeout"
+      );
+    }
+  }
+
   await page.waitForTimeout(800);
 
   const result = await page.evaluate((maxAssets) => {
@@ -298,9 +405,18 @@ async function collectAndPersistAssetKeywords(
       waitUntil: "domcontentloaded",
       timeout: 30_000
     });
-    await page
+    const keywordSelectorFound = await page
       .waitForSelector('[data-t="keywords-section"]', { timeout: 15_000 })
-      .catch(() => undefined);
+      .then(() => true)
+      .catch(() => false);
+    const diagnostics = await getPageDiagnostics(page);
+    if (!keywordSelectorFound && diagnostics.botDetected) {
+      throw new CrawlerStageError(
+        `Halaman detail asset terkena bot challenge: ${diagnostics.url}`,
+        "bot_detected"
+      );
+    }
+
     await page.waitForTimeout(500);
 
     const keywordRows = await page.evaluate(() =>
@@ -333,8 +449,26 @@ async function collectAndPersistAssetKeywords(
         })
         .onConflictDoNothing();
     }
+    if (!keywordRows.length) {
+      await appendResearchEvent(
+        researchRunId,
+        "warning",
+        "keyword_detail_empty",
+        `Keyword detail kosong untuk asset ${item.externalId}`,
+        { assetId, pageUrl: diagnostics.url, pageTitle: diagnostics.title }
+      );
+    }
     return keywordRows.length ? "success" : "empty";
-  } catch {
+  } catch (error) {
+    const diagnostics = await getPageDiagnostics(page);
+    const failureType = classifyFailure(error, diagnostics);
+    await appendResearchEvent(
+      researchRunId,
+      "warning",
+      "keyword_detail_failed",
+      `Keyword detail gagal untuk asset ${item.externalId} [${failureType}]`,
+      { assetId, assetUrl: item.assetUrl, ...diagnosticMetadata(error, diagnostics, failureType) }
+    );
     // Detail keyword enrichment is optional per asset. Search metadata remains valid.
     return "failed";
   }
@@ -344,7 +478,8 @@ async function withRetry<T>(
   researchRunId: string,
   label: string,
   task: () => Promise<T>,
-  maxAttempts = 2
+  maxAttempts = 2,
+  diagnostics?: () => Promise<PageDiagnostics>
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -352,19 +487,38 @@ async function withRetry<T>(
       return await task();
     } catch (error) {
       lastError = error;
+      const pageState = diagnostics ? await diagnostics() : undefined;
+      const failureType = classifyFailure(error, pageState);
+      const metadata = {
+        attempt,
+        maxAttempts,
+        ...diagnosticMetadata(error, pageState, failureType)
+      };
       if (attempt < maxAttempts) {
         await appendResearchEvent(
           researchRunId,
           "warning",
           "query_retry",
-          `${label} gagal, mencoba ulang (${attempt}/${maxAttempts - 1})`,
-          { attempt, maxAttempts }
+          `${label} gagal [${failureType}], mencoba ulang (${attempt}/${maxAttempts - 1})`,
+          metadata
         );
         await new Promise((resolve) => setTimeout(resolve, 1_500 * attempt));
+      } else {
+        await appendResearchEvent(
+          researchRunId,
+          "error",
+          "query_failed",
+          `${label} gagal setelah ${maxAttempts} percobaan [${failureType}]`,
+          metadata
+        );
       }
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(`${label} gagal`);
+  const failureType = classifyFailure(lastError);
+  throw new CrawlerStageError(
+    `${label} gagal [${failureType}]: ${errorMessage(lastError)}`,
+    failureType
+  );
 }
 
 interface ResearchHooks {
@@ -446,6 +600,19 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         args: ["--disable-dev-shm-usage", "--disable-gpu"]
       }
     },
+    failedRequestHandler: async ({ request, error }) => {
+      const failureType = classifyFailure(error);
+      await appendResearchEvent(
+        researchRunId,
+        "error",
+        "crawler_request_failed",
+        `Request crawler gagal [${failureType}]: ${request.url}`,
+        {
+          requestUrl: request.url,
+          ...diagnosticMetadata(error, undefined, failureType)
+        }
+      );
+    },
     requestHandler: async ({ page }) => {
       requestHandled = true;
       await page.goto(searchUrl(run.seedKeyword, run.assetType), {
@@ -462,6 +629,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
       const suggestionRows = await collectSuggestions(
         page,
+        researchRunId,
         run.seedKeyword,
         run.maxSuggestions
       );
@@ -532,7 +700,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
               run.assetType,
               sortMode,
               run.assetsPerQuery
-            )
+            ),
+            2,
+            () => getPageDiagnostics(page)
           );
           await persistSearch(researchRunId, suggestion.suggestion, run.assetType, sortMode, run.locale, searchResult.resultCount, searchResult.assets);
           resumeState.completedKeys.add(queryKey);
