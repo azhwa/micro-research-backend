@@ -48,14 +48,14 @@ function normalizeProxyUrl(value: string) {
     throw new Error("Format proxy tidak valid. Gunakan host:port atau http://host:port");
   }
   if (!PROXY_PROTOCOLS.has(parsed.protocol)) {
-    throw new Error("Proxy hanya mendukung http, https, socks5, atau socks5h");
+    throw new Error("Proxy hanya mendukung http, https, socks5, atau socks5h. socks4 belum didukung Playwright");
   }
   const defaultPort = parsed.protocol === "http:" ? "80" : parsed.protocol === "https:" ? "443" : "";
   const port = parsed.port || defaultPort;
   if (!parsed.hostname || !port) {
     throw new Error("Proxy harus memiliki host dan port");
   }
-  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+  if ((parsed.pathname !== "/" && parsed.pathname !== "") || parsed.search || parsed.hash) {
     throw new Error("Proxy URL tidak boleh memiliki path, query, atau hash");
   }
   const protocol = parsed.protocol === "socks5h:" ? "socks5:" : parsed.protocol;
