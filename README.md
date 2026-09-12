@@ -33,4 +33,4 @@ pm2 status
 pm2 logs micro-research-backend
 ```
 
-`ecosystem.config.js` menggunakan satu instance fork, tanpa watch, dengan restart otomatis dan batas memory 400 MB. Environment rahasia tetap dibaca dari file `.env` di server dan tidak disimpan di repository.
+`ecosystem.config.js` menggunakan satu instance fork, tanpa watch, dengan restart otomatis dan batas memory 550 MB. Batas ini hanya untuk proses aplikasi yang dipantau PM2; Chromium Playwright dan `cloudflared` tetap perlu dipantau dari total penggunaan RAM VPS. Environment rahasia tetap dibaca dari file `.env` di server dan tidak disimpan di repository.
