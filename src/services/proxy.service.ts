@@ -115,6 +115,30 @@ export async function createProxyEndpoint(userId: string, label: string, value: 
   return row ? publicProxy(row) : null;
 }
 
+export async function createProxyBatch(userId: string, label: string, value: string) {
+  const lines = value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const created: Array<ReturnType<typeof publicProxy>> = [];
+  const rejected: Array<{ value: string; reason: string }> = [];
+
+  for (const [index, line] of lines.entries()) {
+    try {
+      const proxy = await createProxyEndpoint(
+        userId,
+        lines.length > 1 ? label + " " + (index + 1) : label,
+        line
+      );
+      if (proxy) created.push(proxy);
+    } catch (error) {
+      rejected.push({
+        value: line,
+        reason: error instanceof Error ? error.message : "Proxy tidak valid"
+      });
+    }
+  }
+
+  return { created, rejected, total: lines.length };
+}
+
 export async function deleteProxyEndpoint(id: string) {
   const result = await getDatabase().delete(proxyEndpoints).where(eq(proxyEndpoints.id, id));
   return result.rowsAffected > 0;

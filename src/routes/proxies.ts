@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { requireAdmin } from "../auth";
 import {
   createProxyEndpoint,
+  createProxyBatch,
   deleteProxyEndpoint,
   listProxyEndpoints,
   setProxyEndpointStatus,
@@ -42,6 +43,18 @@ export async function proxyRoutes(app: FastifyInstance): Promise<void> {
           message: error instanceof Error ? error.message : "Proxy tidak valid"
         });
       }
+    }
+  );
+
+  app.post<{ Body: CreateProxyBody }>(
+    "/api/proxies/batch",
+    { preHandler: requireAdmin },
+    async (request, reply) => {
+      const label = typeof request.body?.label === "string" ? request.body.label : "Proxy";
+      const proxyUrls = typeof request.body?.proxyUrl === "string" ? request.body.proxyUrl : "";
+      return reply.status(201).send(
+        await createProxyBatch(request.auth?.userId ?? "", label, proxyUrls)
+      );
     }
   );
 
