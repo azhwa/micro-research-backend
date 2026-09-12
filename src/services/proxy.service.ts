@@ -50,15 +50,19 @@ function normalizeProxyUrl(value: string) {
   if (!PROXY_PROTOCOLS.has(parsed.protocol)) {
     throw new Error("Proxy hanya mendukung http, https, socks5, atau socks5h");
   }
-  if (!parsed.hostname || !parsed.port) {
+  const defaultPort = parsed.protocol === "http:" ? "80" : parsed.protocol === "https:" ? "443" : "";
+  const port = parsed.port || defaultPort;
+  if (!parsed.hostname || !port) {
     throw new Error("Proxy harus memiliki host dan port");
   }
   if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
     throw new Error("Proxy URL tidak boleh memiliki path, query, atau hash");
   }
   const protocol = parsed.protocol === "socks5h:" ? "socks5:" : parsed.protocol;
-  const proxyUrl = `${protocol}//${parsed.host}${parsed.username ? `:${parsed.username}` : ""}${parsed.password ? `:${parsed.password}` : ""}`;
-  const displayUrl = `${parsed.protocol}//${parsed.host}`;
+  const hostname = parsed.hostname.includes(":") ? `[${parsed.hostname}]` : parsed.hostname;
+  const hostPort = `${hostname}:${port}`;
+  const proxyUrl = `${protocol}//${parsed.username ? `${parsed.username}:${parsed.password}@` : ""}${hostPort}`;
+  const displayUrl = `${parsed.protocol}//${hostPort}`;
   return { proxyUrl, displayUrl };
 }
 
