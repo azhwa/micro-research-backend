@@ -56,12 +56,15 @@ type FailureType =
   | "timeout"
   | "selector_timeout"
   | "navigation_error"
+  | "http_error"
+  | "asset_not_found"
   | "database_error"
   | "unknown";
 
 interface PageDiagnostics {
   url: string;
   title: string;
+  httpStatus: number | null;
   botDetected: boolean;
   bodyPreview: string;
 }
@@ -76,9 +79,9 @@ class CrawlerStageError extends Error {
   }
 }
 
-const BOT_MARKERS = /captcha|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked|challenge/i;
+const BOT_MARKERS = /captcha|datadome|captcha-delivery\.com|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked|challenge/i;
 
-async function getPageDiagnostics(page: Page): Promise<PageDiagnostics> {
+async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
   const title = await page.title().catch(() => "");
   const body = await page
@@ -86,9 +89,13 @@ async function getPageDiagnostics(page: Page): Promise<PageDiagnostics> {
     .innerText({ timeout: 2_000 })
     .catch(() => "");
   const bodyPreview = body.replace(/\s+/g, " ").trim().slice(0, 240);
-  const botDetected = BOT_MARKERS.test(`${url} ${title} ${bodyPreview}`);
+  const frameUrls = page.frames().map((frame) => frame.url()).join(" ");
+  const html = !bodyPreview || title === "adobe.com"
+    ? await page.content().catch(() => "")
+    : "";
+  const botDetected = BOT_MARKERS.test(`${url} ${title} ${bodyPreview} ${frameUrls} ${html.slice(0, 20_000)}`);
 
-  return { url, title, botDetected, bodyPreview };
+  return { url, title, httpStatus, botDetected, bodyPreview };
 }
 
 function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): FailureType {
@@ -98,6 +105,8 @@ function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): Failure
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
   if (/timeout|timed out/i.test(text)) return "timeout";
   if (/net::|navigation|page\.goto/i.test(text)) return "navigation_error";
+  if (/404|not found/i.test(text)) return "asset_not_found";
+  if (/http|status code|403|500/i.test(text)) return "http_error";
   if (/turso|sqlite|database|constraint/i.test(text)) return "database_error";
   return "unknown";
 }
@@ -119,6 +128,7 @@ function diagnosticMetadata(
       ? {
           pageUrl: diagnostics.url,
           pageTitle: diagnostics.title,
+          httpStatus: diagnostics.httpStatus,
           botDetected: diagnostics.botDetected,
           bodyPreview: diagnostics.bodyPreview
         }
@@ -194,10 +204,18 @@ async function collectSearchResults(
   sortMode: SortMode,
   limit: number
 ) {
-  await page.goto(searchUrl(query, assetType, sortMode), {
+  const response = await page.goto(searchUrl(query, assetType, sortMode), {
     waitUntil: "domcontentloaded",
     timeout: 30_000
   });
+  const httpStatus = response?.status() ?? null;
+  if (httpStatus !== null && httpStatus >= 400) {
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
+    throw new CrawlerStageError(
+      `Adobe search mengembalikan HTTP ${httpStatus}${diagnostics.botDetected ? "; terindikasi bot challenge" : ""}`,
+      diagnostics.botDetected ? "bot_detected" : "http_error"
+    );
+  }
 
   const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
   const selectorFound = await page
@@ -206,7 +224,7 @@ async function collectSearchResults(
     .catch(() => false);
 
   if (!selectorFound) {
-    const diagnostics = await getPageDiagnostics(page);
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
     const noResults = /no results|0 results|didn't find any/i.test(diagnostics.bodyPreview);
     if (!noResults) {
       throw new CrawlerStageError(
@@ -399,17 +417,34 @@ async function collectAndPersistAssetKeywords(
 ): Promise<"success" | "empty" | "failed"> {
   const database = getDatabase();
   const assetId = makeStableId("asset", "adobe_stock", item.externalId);
+  let responseStatus: number | null = null;
 
   try {
-    await page.goto(item.assetUrl, {
+    const response = await page.goto(item.assetUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30_000
     });
+    const httpStatus = response?.status() ?? null;
+    responseStatus = httpStatus;
+    const initialDiagnostics = await getPageDiagnostics(page, httpStatus);
+    if (initialDiagnostics.botDetected || httpStatus === 403) {
+      throw new CrawlerStageError(
+        `Halaman detail asset terkena bot challenge (HTTP ${httpStatus ?? "unknown"}): ${initialDiagnostics.url}`,
+        "bot_detected"
+      );
+    }
+    if (httpStatus === 404 || /\/404(?:$|[?#])/.test(initialDiagnostics.url)) {
+      throw new CrawlerStageError(
+        `Halaman detail asset tidak ditemukan (HTTP ${httpStatus ?? "unknown"}): ${initialDiagnostics.url}`,
+        "asset_not_found"
+      );
+    }
+
     const keywordSelectorFound = await page
       .waitForSelector('[data-t="keywords-section"]', { timeout: 15_000 })
       .then(() => true)
       .catch(() => false);
-    const diagnostics = await getPageDiagnostics(page);
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
     if (!keywordSelectorFound && diagnostics.botDetected) {
       throw new CrawlerStageError(
         `Halaman detail asset terkena bot challenge: ${diagnostics.url}`,
@@ -460,7 +495,7 @@ async function collectAndPersistAssetKeywords(
     }
     return keywordRows.length ? "success" : "empty";
   } catch (error) {
-    const diagnostics = await getPageDiagnostics(page);
+    const diagnostics = await getPageDiagnostics(page, responseStatus);
     const failureType = classifyFailure(error, diagnostics);
     await appendResearchEvent(
       researchRunId,
@@ -615,10 +650,30 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     },
     requestHandler: async ({ page }) => {
       requestHandled = true;
-      await page.goto(searchUrl(run.seedKeyword, run.assetType), {
+      const response = await page.goto(searchUrl(run.seedKeyword, run.assetType), {
         waitUntil: "domcontentloaded",
         timeout: 30_000
       });
+      const httpStatus = response?.status() ?? null;
+      const diagnostics = await getPageDiagnostics(page, httpStatus);
+      if (diagnostics.botDetected || (httpStatus !== null && httpStatus >= 400)) {
+        const failureType: FailureType = diagnostics.botDetected ? "bot_detected" : "http_error";
+        await appendResearchEvent(
+          researchRunId,
+          "error",
+          "search_page_failed",
+          `Halaman pencarian gagal [${failureType}]`,
+          diagnosticMetadata(
+            new CrawlerStageError(`Adobe search HTTP ${httpStatus ?? "unknown"}`, failureType),
+            diagnostics,
+            failureType
+          )
+        );
+        throw new CrawlerStageError(
+          `Halaman pencarian gagal [${failureType}]${httpStatus ? ` HTTP ${httpStatus}` : ""}`,
+          failureType
+        );
+      }
       await appendResearchEvent(
         researchRunId,
         "info",
