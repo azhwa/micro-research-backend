@@ -21,7 +21,9 @@ export function buildApp() {
 
   app.register(cors, {
     origin: env.frontendOrigin,
-    allowedHeaders: ["Content-Type", "Authorization"]
+    methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 600
   });
   app.register(helmet);
   app.register(rateLimit, {
