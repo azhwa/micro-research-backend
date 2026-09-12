@@ -119,7 +119,6 @@ async function getPageDiagnostics(page: Page, httpStatus: number | null = null):
 }
 
 function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): FailureType {
-  if (diagnostics?.botDetected) return "bot_detected";
   if (error instanceof CrawlerStageError) return error.failureType;
 
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
@@ -232,13 +231,6 @@ async function collectSearchResults(
     timeout: navigationTimeout
   });
   const httpStatus = response?.status() ?? null;
-  if (httpStatus !== null && httpStatus >= 400) {
-    const diagnostics = await getPageDiagnostics(page, httpStatus);
-    throw new CrawlerStageError(
-      `Adobe search mengembalikan HTTP ${httpStatus}${diagnostics.botDetected ? "; terindikasi bot challenge" : ""}`,
-      diagnostics.botDetected ? "bot_detected" : "http_error"
-    );
-  }
 
   const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
   const selectorFound = await page
@@ -251,8 +243,8 @@ async function collectSearchResults(
     const noResults = /no results|0 results|didn't find any/i.test(diagnostics.bodyPreview);
     if (!noResults) {
       throw new CrawlerStageError(
-        `Selector hasil Adobe tidak ditemukan pada ${diagnostics.url}${diagnostics.botDetected ? "; halaman terlihat seperti bot challenge" : ""}`,
-        diagnostics.botDetected ? "bot_detected" : "selector_timeout"
+        `Selector hasil Adobe tidak ditemukan pada ${diagnostics.url}`,
+        "selector_timeout"
       );
     }
   }
@@ -454,12 +446,6 @@ async function collectAndPersistAssetKeywords(
     const httpStatus = response?.status() ?? null;
     responseStatus = httpStatus;
     const initialDiagnostics = await getPageDiagnostics(page, httpStatus);
-    if (initialDiagnostics.botDetected || httpStatus === 403) {
-      throw new CrawlerStageError(
-        `Halaman detail asset terkena bot challenge (HTTP ${httpStatus ?? "unknown"}): ${initialDiagnostics.url}`,
-        "bot_detected"
-      );
-    }
     if (httpStatus === 404 || /\/404(?:$|[?#])/.test(initialDiagnostics.url)) {
       throw new CrawlerStageError(
         `Halaman detail asset tidak ditemukan (HTTP ${httpStatus ?? "unknown"}): ${initialDiagnostics.url}`,
@@ -472,12 +458,6 @@ async function collectAndPersistAssetKeywords(
       .then(() => true)
       .catch(() => false);
     const diagnostics = await getPageDiagnostics(page, httpStatus);
-    if (!keywordSelectorFound && diagnostics.botDetected) {
-      throw new CrawlerStageError(
-        `Halaman detail asset terkena bot challenge: ${diagnostics.url}`,
-        "bot_detected"
-      );
-    }
 
     await page.waitForTimeout(500);
 
@@ -711,21 +691,12 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       const httpStatus = response?.status() ?? null;
       const diagnostics = await getPageDiagnostics(page, httpStatus);
       if (diagnostics.botDetected || (httpStatus !== null && httpStatus >= 400)) {
-        const failureType: FailureType = diagnostics.botDetected ? "bot_detected" : "http_error";
         await appendResearchEvent(
           researchRunId,
-          "error",
-          "search_page_failed",
-          `Halaman pencarian gagal [${failureType}]${httpStatus !== null ? ` HTTP ${httpStatus}` : ""}${diagnostics.title ? ` (${diagnostics.title})` : ""}`,
-          diagnosticMetadata(
-            new CrawlerStageError(`Adobe search HTTP ${httpStatus ?? "unknown"}`, failureType),
-            diagnostics,
-            failureType
-          )
-        );
-        throw new CrawlerStageError(
-          `Halaman pencarian gagal [${failureType}]${httpStatus ? ` HTTP ${httpStatus}` : ""}`,
-          failureType
+          "warning",
+          "search_page_diagnostic",
+          `Respons pencarian Adobe tidak normal${httpStatus !== null ? ` HTTP ${httpStatus}` : ""}${diagnostics.title ? ` (${diagnostics.title})` : ""}; crawler tetap mencoba`,
+          diagnosticMetadata(new Error("Adobe search response diagnostic"), diagnostics)
         );
       }
       await appendResearchEvent(
