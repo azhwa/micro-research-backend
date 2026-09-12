@@ -112,7 +112,14 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
             message: "Batalkan research yang sedang berjalan sebelum menghapusnya"
           });
         }
-        throw error;
+        request.log.error(
+          { err: error, researchRunId: request.params.id },
+          "Research delete failed"
+        );
+        return reply.status(500).send({
+          error: "RESEARCH_DELETE_FAILED",
+          message: "Research tidak dapat dihapus. Periksa log backend."
+        });
       }
     }
   );
@@ -251,15 +258,26 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>(
     "/api/research-runs/:id/cancel",
     async (request, reply) => {
-      const run = await cancelResearchRun(request.params.id, request.auth);
+      try {
+        const run = await cancelResearchRun(request.params.id, request.auth);
 
-      if (!run) {
-        return reply.status(404).send({
-          error: "RESEARCH_NOT_FOUND_OR_FINISHED"
+        if (!run) {
+          return reply.status(404).send({
+            error: "RESEARCH_NOT_FOUND_OR_FINISHED"
+          });
+        }
+
+        return run;
+      } catch (error) {
+        request.log.error(
+          { err: error, researchRunId: request.params.id },
+          "Research cancel failed"
+        );
+        return reply.status(500).send({
+          error: "RESEARCH_CANCEL_FAILED",
+          message: "Research tidak dapat dibatalkan. Periksa log backend."
         });
       }
-
-      return run;
     }
   );
 }

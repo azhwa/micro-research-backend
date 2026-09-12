@@ -58,7 +58,14 @@ export function buildApp() {
   app.register(geminiRoutes);
 
   app.setErrorHandler((error, request, reply) => {
-    request.log.error(error);
+    request.log.error(
+      {
+        err: error,
+        method: request.method,
+        url: request.url
+      },
+      "Unhandled request error"
+    );
     return reply.status(500).send({
       error: "INTERNAL_SERVER_ERROR",
       message:
