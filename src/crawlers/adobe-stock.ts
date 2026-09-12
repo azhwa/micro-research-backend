@@ -90,7 +90,8 @@ class CrawlerStageError extends Error {
   }
 }
 
-const BOT_MARKERS = /captcha|datadome|captcha-delivery\.com|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked|challenge/i;
+const VISIBLE_BOT_MARKERS = /captcha|datadome|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked/i;
+const HTML_BOT_MARKERS = /datadome|captcha-delivery\.com|geo\.captcha-delivery\.com|cf-chl-|challenge-platform/i;
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
@@ -104,7 +105,8 @@ async function getPageDiagnostics(page: Page, httpStatus: number | null = null):
   const html = !bodyPreview || title === "adobe.com"
     ? await page.content().catch(() => "")
     : "";
-  const botDetected = BOT_MARKERS.test(`${url} ${title} ${bodyPreview} ${frameUrls} ${html.slice(0, 20_000)}`);
+  const botDetected = VISIBLE_BOT_MARKERS.test(`${url} ${title} ${bodyPreview} ${frameUrls}`)
+    || HTML_BOT_MARKERS.test(html.slice(0, 20_000));
 
   return { url, title, httpStatus, botDetected, bodyPreview };
 }
