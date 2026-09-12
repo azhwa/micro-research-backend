@@ -91,7 +91,9 @@ class CrawlerStageError extends Error {
 }
 
 const VISIBLE_BOT_MARKERS = /captcha|datadome|verify you are human|access denied|unusual traffic|security check|robot check|temporarily blocked/i;
-const HTML_BOT_MARKERS = /datadome|captcha-delivery\.com|geo\.captcha-delivery\.com|cf-chl-|challenge-platform/i;
+// Do not flag a normal page merely because it loads a DataDome SDK. Require
+// evidence of the actual challenge page or challenge delivery endpoint.
+const HTML_BOT_MARKERS = /captcha-delivery\.com|DataDome CAPTCHA|dd-captcha|cf-chl-|challenge-platform/i;
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
@@ -691,7 +693,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           researchRunId,
           "error",
           "search_page_failed",
-          `Halaman pencarian gagal [${failureType}]`,
+          `Halaman pencarian gagal [${failureType}]${httpStatus !== null ? ` HTTP ${httpStatus}` : ""}${diagnostics.title ? ` (${diagnostics.title})` : ""}`,
           diagnosticMetadata(
             new CrawlerStageError(`Adobe search HTTP ${httpStatus ?? "unknown"}`, failureType),
             diagnostics,
