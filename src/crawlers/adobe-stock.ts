@@ -651,6 +651,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   const keywordDetailLimit = mode === "fast" ? 1 : Number.POSITIVE_INFINITY;
 
   let requestHandled = false;
+  let requestSucceeded = false;
 
   const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
@@ -762,7 +763,10 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       for (const suggestion of suggestionRows) {
         for (const sortMode of sortModes) {
           const latestRun = await getResearchRun(researchRunId);
-          if (!latestRun || latestRun.status === "cancelled") return;
+          if (!latestRun || latestRun.status === "cancelled") {
+            requestSucceeded = true;
+            return;
+          }
 
           const queryKey = `${suggestion.suggestion}\u001f${sortMode}`;
           if (resumeState.completedKeys.has(queryKey)) {
@@ -844,6 +848,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
         }
       }
+      requestSucceeded = true;
     }
   });
 
@@ -855,7 +860,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     }
   ]);
 
-  if (!requestHandled) {
-    throw new Error("Crawler tidak memproses request Adobe Stock");
+  if (!requestHandled || !requestSucceeded) {
+    throw new Error("Crawler gagal menyelesaikan request Adobe Stock");
   }
 }
