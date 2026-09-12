@@ -3,6 +3,7 @@ import { requireAdmin } from "../auth";
 import {
   createProxyEndpoint,
   createProxyBatch,
+  deleteAllProxyEndpoints,
   deleteProxyEndpoint,
   listProxyEndpoints,
   setProxyEndpointStatus,
@@ -21,6 +22,12 @@ interface StatusBody {
 
 export async function proxyRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/proxies", { preHandler: requireAdmin }, async () => listProxyEndpoints());
+
+  app.delete(
+    "/api/proxies",
+    { preHandler: requireAdmin },
+    async () => ({ deleted: await deleteAllProxyEndpoints() })
+  );
 
   app.post(
     "/api/proxies/validate-all",

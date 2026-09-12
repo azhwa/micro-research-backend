@@ -144,6 +144,11 @@ export async function deleteProxyEndpoint(id: string) {
   return result.rowsAffected > 0;
 }
 
+export async function deleteAllProxyEndpoints() {
+  const result = await getDatabase().delete(proxyEndpoints);
+  return result.rowsAffected;
+}
+
 export async function setProxyEndpointStatus(id: string, status: "active" | "disabled") {
   const [row] = await getDatabase().update(proxyEndpoints)
     .set({ status, updatedAt: new Date() })
