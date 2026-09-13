@@ -46,7 +46,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       const assetType = body.assetType === "videos" ? "videos" : "images";
       const locale = typeof body.locale === "string" && body.locale.trim()
         ? body.locale.trim()
-        : "en-US";
+        : "en-GB";
       const maxSuggestions = positiveInteger(body.maxSuggestions, 30);
       const assetsPerQuery = positiveInteger(body.assetsPerQuery, 30);
       const mode: ResearchMode = body.mode === "fast" ? "fast" : "full";

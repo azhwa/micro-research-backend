@@ -47,15 +47,25 @@ function chunks<T>(rows: T[], size = BATCH_SIZE): T[][] {
   return result;
 }
 
-function searchUrl(query: string, assetType: string, sortMode?: SortMode, locale?: string): string {
+function adobeLocalePrefix(locale?: string): string {
   const normalizedLocale = locale?.toLowerCase().replace(/_/g, "-") ?? "";
-  const localePrefix = normalizedLocale.startsWith("id")
+  return normalizedLocale.startsWith("id")
     ? "/id"
     : normalizedLocale.startsWith("en-gb") || normalizedLocale.startsWith("en-uk")
       ? "/uk"
       : "";
-  const path = localePrefix + (assetType === "videos" ? "/search/video" : "/search/images");
-  const url = new URL(path, "https://stock.adobe.com");
+}
+
+function searchPath(assetType: string, locale?: string): string {
+  return adobeLocalePrefix(locale) + (assetType === "videos" ? "/search/video" : "/search/images");
+}
+
+function searchPageUrl(assetType: string, locale?: string): string {
+  return new URL(searchPath(assetType, locale), "https://stock.adobe.com").toString();
+}
+
+function searchUrl(query: string, assetType: string, sortMode?: SortMode, locale?: string): string {
+  const url = new URL(searchPath(assetType, locale), "https://stock.adobe.com");
   url.searchParams.set("k", query);
   url.searchParams.set("limit", "100");
   url.searchParams.set("search_page", "1");
@@ -168,7 +178,7 @@ async function collectSuggestions(
   max: number,
   maxPrefixes: number,
   selectorTimeout: number,
-  initialHttpStatus: number | null
+  initialDiagnostics: PageDiagnostics
 ) {
   const prefixes = [
     `${seed} `,
@@ -186,14 +196,14 @@ async function collectSuggestions(
     '.js-search-input.js-search-text-input, input[name="search"], input[name="k"], input[aria-label*="Search" i], input[type="search"]'
   ).first();
 
-  if (initialHttpStatus !== null && initialHttpStatus >= 400) {
+  if (initialDiagnostics.botDetected) {
     source = "seed_fallback";
     await appendResearchEvent(
       researchRunId,
       "info",
       "autocomplete_unavailable",
-      `Autocomplete dilewati karena halaman search merespons HTTP ${initialHttpStatus}`,
-      { httpStatus: initialHttpStatus, source }
+      "Autocomplete dilewati karena halaman challenge terdeteksi",
+      { ...initialDiagnostics, source }
     );
   } else {
     try {
@@ -779,20 +789,23 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     },
     requestHandler: async ({ page }) => {
       requestHandled = true;
-      const response = await page.goto(searchUrl(run.seedKeyword, run.assetType, undefined, run.locale), {
+      // Autocomplete must start from the clean Adobe search page. The
+      // extension does not open a query URL first; it types into this page
+      // and reads the resulting DOM panel.
+      const response = await page.goto(searchPageUrl(run.assetType, run.locale), {
         waitUntil: "domcontentloaded",
         timeout: navigationTimeout
       });
       const httpStatus = response?.status() ?? null;
       const diagnostics = await getPageDiagnostics(page, httpStatus);
-      if (diagnostics.botDetected || (httpStatus !== null && httpStatus >= 400)) {
+      if (diagnostics.botDetected) {
         await appendResearchEvent(
           researchRunId,
           "warning",
           "search_page_diagnostic",
-          `Respons pencarian Adobe tidak normal${httpStatus !== null ? ` HTTP ${httpStatus}` : ""}${diagnostics.title ? ` (${diagnostics.title})` : ""}; crawler tetap mencoba`,
+          `Halaman autocomplete Adobe berisi challenge${httpStatus !== null ? ` (HTTP ${httpStatus})` : ""}; crawler memakai fallback`,
           {
-            diagnostic: "non_normal_http_response",
+            diagnostic: "challenge_page",
             pageUrl: diagnostics.url,
             pageTitle: diagnostics.title,
             httpStatus: diagnostics.httpStatus,
@@ -800,14 +813,13 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             bodyPreview: diagnostics.bodyPreview
           }
         );
-      }
-      if (!diagnostics.botDetected && (httpStatus === null || httpStatus < 400)) {
+      } else {
         await appendResearchEvent(
           researchRunId,
           "info",
-          "search_page_opened",
-          "Halaman pencarian Adobe Stock dibuka",
-          { assetType: run.assetType, locale: run.locale }
+          "autocomplete_page_opened",
+          "Halaman search bersih Adobe Stock dibuka",
+          { assetType: run.assetType, locale: run.locale, httpStatus: diagnostics.httpStatus }
         );
       }
 
@@ -818,7 +830,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         run.maxSuggestions,
         autocompletePrefixLimit,
         selectorTimeout,
-        httpStatus
+        diagnostics
       );
       const suggestionRows = suggestionResult.rows;
       await persistSuggestions(researchRunId, suggestionRows, run.locale);
