@@ -261,10 +261,20 @@ async function collectSuggestions(
   for (const [index, prefix] of source === "adobe_autocomplete" ? prefixes.entries() : []) {
     try {
       // The extension types into the existing Adobe input and emits input
-      // events. pressSequentially reproduces that flow more closely than a
-      // single fill() operation and allows Adobe's UI listener to react.
-      await input.fill("", { timeout: selectorTimeout });
-      await input.pressSequentially(prefix, { delay: 35 });
+      // events. Use the same value mutation and input dispatch as the
+      // extension; keyboard events can be ignored by Adobe's search handler.
+      await page.evaluate(async ({ selector, value }) => {
+        const element = document.querySelector(selector) as HTMLInputElement | null;
+        if (!element) throw new Error("Autocomplete input tidak ditemukan saat typing");
+        element.focus();
+        element.value = "";
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        for (const character of value) {
+          element.value += character;
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }, { selector: AUTOCOMPLETE_INPUT_SELECTOR, value: prefix });
 
       const panel = page.locator(AUTOCOMPLETE_PANEL_SELECTOR).first();
       const panelItems = panel.locator("li, [role=\"option\"]").first();
@@ -363,8 +373,12 @@ async function collectSearchResults(
   const httpStatus = response?.status() ?? null;
 
   const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
+  // Fast mode reduces query count, but headed Chromium on the VPS can still
+  // need more time for Adobe's result cards to be inserted after the HTML
+  // shell and result count have already appeared.
+  const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
   const selectorFound = await page
-    .waitForSelector(resultSelector, { timeout: selectorTimeout })
+    .waitForSelector(resultSelector, { timeout: resultSelectorTimeout })
     .then(() => true)
     .catch(() => false);
 
