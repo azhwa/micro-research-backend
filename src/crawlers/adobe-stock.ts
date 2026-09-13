@@ -21,6 +21,7 @@ import {
   markProxySuccess,
   selectProxyForResearch
 } from "../services/proxy.service";
+import { env } from "../config/env";
 
 type SortMode = "downloads" | "relevance" | "recent";
 
@@ -761,6 +762,13 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       "Tidak ada proxy aktif; crawler memakai koneksi langsung VPS"
     );
   }
+  await appendResearchEvent(
+    researchRunId,
+    "info",
+    "crawler_browser_mode",
+    `Browser crawler: ${env.playwrightHeadless ? "headless" : "headed"}`,
+    { headless: env.playwrightHeadless, display: process.env.DISPLAY ?? null }
+  );
 
   const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
@@ -769,7 +777,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     requestHandlerTimeoutSecs: 900,
     launchContext: {
       launchOptions: {
-        headless: true,
+        headless: env.playwrightHeadless,
         args: ["--disable-dev-shm-usage", "--disable-gpu"],
         ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
       }

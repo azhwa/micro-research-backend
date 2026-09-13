@@ -210,7 +210,7 @@ export async function testProxyEndpoint(id: string) {
   const testedAt = new Date();
   try {
     browser = await chromium.launch({
-      headless: true,
+      headless: env.playwrightHeadless,
       args: ["--disable-dev-shm-usage", "--disable-gpu"],
       proxy: launchProxy(decrypt(row.encryptedUrl))
     });

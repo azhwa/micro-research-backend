@@ -19,10 +19,16 @@ function parseCsv(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parsePort(process.env.PORT),
   host: process.env.HOST ?? "127.0.0.1",
+  playwrightHeadless: parseBoolean(process.env.PLAYWRIGHT_HEADLESS, true),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
   tursoDatabaseUrl: process.env.TURSO_DATABASE_URL ?? "",
   tursoAuthToken: process.env.TURSO_AUTH_TOKEN ?? "",
