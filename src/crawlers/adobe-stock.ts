@@ -48,7 +48,12 @@ function chunks<T>(rows: T[], size = BATCH_SIZE): T[][] {
 }
 
 function searchUrl(query: string, assetType: string, sortMode?: SortMode, locale?: string): string {
-  const localePrefix = locale?.toLowerCase().startsWith("id") ? "/id" : "";
+  const normalizedLocale = locale?.toLowerCase().replace(/_/g, "-") ?? "";
+  const localePrefix = normalizedLocale.startsWith("id")
+    ? "/id"
+    : normalizedLocale.startsWith("en-gb") || normalizedLocale.startsWith("en-uk")
+      ? "/uk"
+      : "";
   const path = localePrefix + (assetType === "videos" ? "/search/video" : "/search/images");
   const url = new URL(path, "https://stock.adobe.com");
   url.searchParams.set("k", query);
@@ -162,7 +167,8 @@ async function collectSuggestions(
   seed: string,
   max: number,
   maxPrefixes: number,
-  selectorTimeout: number
+  selectorTimeout: number,
+  initialHttpStatus: number | null
 ) {
   const prefixes = [
     `${seed} `,
@@ -170,14 +176,94 @@ async function collectSuggestions(
   ].slice(0, maxPrefixes);
   const collected: Array<{ baseKeyword: string; suggestion: string; position: number }> = [];
   const seen = new Set<string>();
+  let source: "adobe_autocomplete" | "seed_fallback" = "adobe_autocomplete";
+  let emptyPanelStreak = 0;
 
-  const input = page.locator('input[name="k"], input[aria-label="Search"]').first();
+  // Keep these selectors aligned with the working browser extension. Adobe
+  // changes the accessible name between localized search pages, while the
+  // class-based selector has remained the most stable one.
+  const input = page.locator(
+    '.js-search-input.js-search-text-input, input[name="search"], input[name="k"], input[aria-label*="Search" i], input[type="search"]'
+  ).first();
 
-  for (const [index, prefix] of prefixes.entries()) {
+  if (initialHttpStatus !== null && initialHttpStatus >= 400) {
+    source = "seed_fallback";
+    await appendResearchEvent(
+      researchRunId,
+      "info",
+      "autocomplete_unavailable",
+      `Autocomplete dilewati karena halaman search merespons HTTP ${initialHttpStatus}`,
+      { httpStatus: initialHttpStatus, source }
+    );
+  } else {
     try {
-      await input.fill(prefix, { timeout: selectorTimeout });
-      await page.waitForTimeout(650);
-      const values = await page.locator(".js-search-autocomplete-panel li").allTextContents();
+      await input.waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 5_000) });
+      await appendResearchEvent(
+        researchRunId,
+        "info",
+        "autocomplete_input_found",
+        "Input autocomplete Adobe ditemukan",
+        { selector: "extension-compatible" }
+      );
+    } catch (error) {
+      source = "seed_fallback";
+      const diagnostics = await getPageDiagnostics(page);
+      const failureType = classifyFailure(error, diagnostics);
+      await appendResearchEvent(
+        researchRunId,
+        "info",
+        "autocomplete_unavailable",
+        `Input autocomplete tidak tersedia [${failureType}]`,
+        diagnosticMetadata(error, diagnostics, failureType)
+      );
+    }
+  }
+
+  for (const [index, prefix] of source === "adobe_autocomplete" ? prefixes.entries() : []) {
+    try {
+      // The extension types into the existing Adobe input and emits input
+      // events. pressSequentially reproduces that flow more closely than a
+      // single fill() operation and allows Adobe's UI listener to react.
+      await input.fill("", { timeout: selectorTimeout });
+      await input.pressSequentially(prefix, { delay: 35 });
+
+      const panel = page.locator(
+        ".js-search-autocomplete-panel, [role=\"listbox\"], [data-t=\"search-autocomplete\"]"
+      ).first();
+      const panelItems = panel.locator("li, [role=\"option\"]").first();
+      let panelFound = false;
+      try {
+        await panelItems.waitFor({ state: "visible", timeout: 3_000 });
+        panelFound = true;
+        emptyPanelStreak = 0;
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "autocomplete_panel_found",
+          `Panel autocomplete ditemukan untuk prefix “${prefix}”`,
+          { prefix }
+        );
+      } catch {
+        // A valid page can have no suggestions for a particular prefix.
+        emptyPanelStreak += 1;
+        if (emptyPanelStreak >= 3) {
+          source = "seed_fallback";
+          await appendResearchEvent(
+            researchRunId,
+            "info",
+            "autocomplete_unavailable",
+            "Panel autocomplete tidak muncul setelah 3 prefix; fallback digunakan",
+            { prefix, attempts: index + 1 }
+          );
+          break;
+        }
+      }
+
+      if (!panelFound) continue;
+
+      const values = await page.locator(
+        ".js-search-autocomplete-panel li, [role=\"listbox\"] [role=\"option\"], [data-t=\"search-autocomplete\"] li"
+      ).allTextContents();
 
       values
         .map((value) => value.trim())
@@ -198,6 +284,7 @@ async function collectSuggestions(
     } catch (error) {
       const diagnostics = await getPageDiagnostics(page);
       const failureType = classifyFailure(error, diagnostics);
+      if (collected.length === 0) source = "seed_fallback";
       await appendResearchEvent(
         researchRunId,
         "warning",
@@ -210,6 +297,7 @@ async function collectSuggestions(
   }
 
   if (collected.length === 0) {
+    source = "seed_fallback";
     collected.push({ baseKeyword: seed, suggestion: seed, position: 1 });
     await appendResearchEvent(
       researchRunId,
@@ -220,7 +308,7 @@ async function collectSuggestions(
     );
   }
 
-  return collected;
+  return { rows: collected, source };
 }
 
 async function collectSearchResults(
@@ -723,21 +811,25 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         );
       }
 
-      const suggestionRows = await collectSuggestions(
+      const suggestionResult = await collectSuggestions(
         page,
         researchRunId,
         run.seedKeyword,
         run.maxSuggestions,
         autocompletePrefixLimit,
-        selectorTimeout
+        selectorTimeout,
+        httpStatus
       );
+      const suggestionRows = suggestionResult.rows;
       await persistSuggestions(researchRunId, suggestionRows, run.locale);
       await appendResearchEvent(
         researchRunId,
-        "success",
+        suggestionResult.source === "adobe_autocomplete" ? "success" : "info",
         "suggestions_collected",
-        `${suggestionRows.length} suggestion berhasil ditemukan`,
-        { count: suggestionRows.length }
+        suggestionResult.source === "adobe_autocomplete"
+          ? `${suggestionRows.length} suggestion Adobe berhasil ditemukan`
+          : `Research dilanjutkan dengan seed keyword “${run.seedKeyword}”`,
+        { count: suggestionRows.length, source: suggestionResult.source }
       );
 
       const database = getDatabase();
