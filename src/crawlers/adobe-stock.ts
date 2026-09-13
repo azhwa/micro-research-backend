@@ -99,6 +99,10 @@ interface PageDiagnostics {
   title: string;
   httpStatus: number | null;
   botDetected: boolean;
+  pageUsable: boolean;
+  searchInputCount: number;
+  searchInputVisible: boolean;
+  assetCount: number;
   bodyPreview: string;
 }
 
@@ -116,6 +120,12 @@ const VISIBLE_BOT_MARKERS = /captcha|datadome|verify you are human|access denied
 // Do not flag a normal page merely because it loads a DataDome SDK. Require
 // evidence of the actual challenge page or challenge delivery endpoint.
 const HTML_BOT_MARKERS = /captcha-delivery\.com|DataDome CAPTCHA|dd-captcha|cf-chl-|challenge-platform/i;
+const AUTOCOMPLETE_INPUT_SELECTOR =
+  '.js-search-input.js-search-text-input, input[name="search"], input[name="k"], input[aria-label*="Search" i], input[type="search"]';
+const AUTOCOMPLETE_PANEL_SELECTOR =
+  '.js-search-autocomplete-panel, [role="listbox"], [data-t="search-autocomplete"]';
+const AUTOCOMPLETE_ITEM_SELECTOR =
+  '.js-search-autocomplete-panel li, [role="listbox"] [role="option"], [data-t="search-autocomplete"] li';
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
@@ -125,14 +135,30 @@ async function getPageDiagnostics(page: Page, httpStatus: number | null = null):
     .innerText({ timeout: 2_000 })
     .catch(() => "");
   const bodyPreview = body.replace(/\s+/g, " ").trim().slice(0, 240);
-  const frameUrls = page.frames().map((frame) => frame.url()).join(" ");
+  const searchInputLocator = page.locator(AUTOCOMPLETE_INPUT_SELECTOR);
+  const searchInputCount = await searchInputLocator.count().catch(() => 0);
+  const searchInputVisible = searchInputCount > 0
+    && await searchInputLocator.first().isVisible().catch(() => false);
+  const assetCount = await page.locator("[data-content-id]").count().catch(() => 0);
   const html = !bodyPreview || title === "adobe.com"
     ? await page.content().catch(() => "")
     : "";
-  const botDetected = VISIBLE_BOT_MARKERS.test(`${url} ${title} ${bodyPreview} ${frameUrls}`)
+  const pageUsable = searchInputVisible || assetCount > 0;
+  const challengeDetected = VISIBLE_BOT_MARKERS.test(`${url} ${title} ${bodyPreview}`)
     || HTML_BOT_MARKERS.test(html.slice(0, 20_000));
+  const botDetected = !pageUsable && challengeDetected;
 
-  return { url, title, httpStatus, botDetected, bodyPreview };
+  return {
+    url,
+    title,
+    httpStatus,
+    botDetected,
+    pageUsable,
+    searchInputCount,
+    searchInputVisible,
+    assetCount,
+    bodyPreview
+  };
 }
 
 function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): FailureType {
@@ -166,6 +192,10 @@ function diagnosticMetadata(
           pageTitle: diagnostics.title,
           httpStatus: diagnostics.httpStatus,
           botDetected: diagnostics.botDetected,
+          pageUsable: diagnostics.pageUsable,
+          searchInputCount: diagnostics.searchInputCount,
+          searchInputVisible: diagnostics.searchInputVisible,
+          assetCount: diagnostics.assetCount,
           bodyPreview: diagnostics.bodyPreview
         }
       : {})
@@ -193,9 +223,7 @@ async function collectSuggestions(
   // Keep these selectors aligned with the working browser extension. Adobe
   // changes the accessible name between localized search pages, while the
   // class-based selector has remained the most stable one.
-  const input = page.locator(
-    '.js-search-input.js-search-text-input, input[name="search"], input[name="k"], input[aria-label*="Search" i], input[type="search"]'
-  ).first();
+  const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
 
   if (initialDiagnostics.botDetected) {
     source = "seed_fallback";
@@ -212,9 +240,9 @@ async function collectSuggestions(
       await appendResearchEvent(
         researchRunId,
         "info",
-        "autocomplete_input_found",
-        "Input autocomplete Adobe ditemukan",
-        { selector: "extension-compatible" }
+      "autocomplete_input_found",
+      "Input autocomplete Adobe ditemukan",
+        { selector: "extension-compatible", searchInputCount: initialDiagnostics.searchInputCount }
       );
     } catch (error) {
       source = "seed_fallback";
@@ -238,9 +266,7 @@ async function collectSuggestions(
       await input.fill("", { timeout: selectorTimeout });
       await input.pressSequentially(prefix, { delay: 35 });
 
-      const panel = page.locator(
-        ".js-search-autocomplete-panel, [role=\"listbox\"], [data-t=\"search-autocomplete\"]"
-      ).first();
+      const panel = page.locator(AUTOCOMPLETE_PANEL_SELECTOR).first();
       const panelItems = panel.locator("li, [role=\"option\"]").first();
       let panelFound = false;
       try {
@@ -272,9 +298,7 @@ async function collectSuggestions(
 
       if (!panelFound) continue;
 
-      const values = await page.locator(
-        ".js-search-autocomplete-panel li, [role=\"listbox\"] [role=\"option\"], [data-t=\"search-autocomplete\"] li"
-      ).allTextContents();
+      const values = await page.locator(AUTOCOMPLETE_ITEM_SELECTOR).allTextContents();
 
       values
         .map((value) => value.trim())
@@ -805,6 +829,11 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         timeout: navigationTimeout
       });
       const httpStatus = response?.status() ?? null;
+      await page
+        .locator(AUTOCOMPLETE_INPUT_SELECTOR)
+        .first()
+        .waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 5_000) })
+        .catch(() => undefined);
       const diagnostics = await getPageDiagnostics(page, httpStatus);
       if (diagnostics.botDetected) {
         await appendResearchEvent(
