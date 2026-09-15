@@ -835,54 +835,76 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     },
     requestHandler: async ({ page }) => {
       requestHandled = true;
-      // Autocomplete must start from the clean Adobe search page. The
-      // extension does not open a query URL first; it types into this page
-      // and reads the resulting DOM panel.
-      const response = await page.goto(searchPageUrl(run.assetType, run.locale), {
-        waitUntil: "domcontentloaded",
-        timeout: navigationTimeout
-      });
-      const httpStatus = response?.status() ?? null;
-      await page
-        .locator(AUTOCOMPLETE_INPUT_SELECTOR)
-        .first()
-        .waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 5_000) })
-        .catch(() => undefined);
-      const diagnostics = await getPageDiagnostics(page, httpStatus);
-      if (diagnostics.botDetected) {
-        await appendResearchEvent(
+      let suggestionResult: Awaited<ReturnType<typeof collectSuggestions>>;
+      if (run.autocompleteEnabled) {
+        // Autocomplete must start from the clean Adobe search page. The
+        // extension does not open a query URL first; it types into this page
+        // and reads the resulting DOM panel.
+        const response = await page.goto(searchPageUrl(run.assetType, run.locale), {
+          waitUntil: "domcontentloaded",
+          timeout: navigationTimeout
+        });
+        const httpStatus = response?.status() ?? null;
+        await page
+          .locator(AUTOCOMPLETE_INPUT_SELECTOR)
+          .first()
+          .waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 5_000) })
+          .catch(() => undefined);
+        const diagnostics = await getPageDiagnostics(page, httpStatus);
+        if (diagnostics.botDetected) {
+          await appendResearchEvent(
+            researchRunId,
+            "warning",
+            "search_page_diagnostic",
+            `Halaman autocomplete Adobe berisi challenge${httpStatus !== null ? ` (HTTP ${httpStatus})` : ""}; crawler memakai fallback`,
+            {
+              diagnostic: "challenge_page",
+              pageUrl: diagnostics.url,
+              pageTitle: diagnostics.title,
+              httpStatus: diagnostics.httpStatus,
+              botDetected: diagnostics.botDetected,
+              bodyPreview: diagnostics.bodyPreview
+            }
+          );
+        } else {
+          await appendResearchEvent(
+            researchRunId,
+            "info",
+            "autocomplete_page_opened",
+            "Halaman search bersih Adobe Stock dibuka",
+            { assetType: run.assetType, locale: run.locale, httpStatus: diagnostics.httpStatus }
+          );
+        }
+
+        suggestionResult = await collectSuggestions(
+          page,
           researchRunId,
-          "warning",
-          "search_page_diagnostic",
-          `Halaman autocomplete Adobe berisi challenge${httpStatus !== null ? ` (HTTP ${httpStatus})` : ""}; crawler memakai fallback`,
-          {
-            diagnostic: "challenge_page",
-            pageUrl: diagnostics.url,
-            pageTitle: diagnostics.title,
-            httpStatus: diagnostics.httpStatus,
-            botDetected: diagnostics.botDetected,
-            bodyPreview: diagnostics.bodyPreview
-          }
+          run.seedKeyword,
+          run.maxSuggestions,
+          autocompletePrefixLimit,
+          selectorTimeout,
+          diagnostics
         );
       } else {
+        suggestionResult = {
+          rows: [{ baseKeyword: run.seedKeyword, suggestion: run.seedKeyword, position: 1 }],
+          source: "seed_fallback"
+        };
         await appendResearchEvent(
           researchRunId,
           "info",
-          "autocomplete_page_opened",
-          "Halaman search bersih Adobe Stock dibuka",
-          { assetType: run.assetType, locale: run.locale, httpStatus: diagnostics.httpStatus }
+          "autocomplete_disabled",
+          "Autocomplete dinonaktifkan; seed keyword dipakai untuk research",
+          { seedKeyword: run.seedKeyword }
+        );
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "suggestions_fallback",
+          "Autocomplete tidak dijalankan; seed keyword dipakai untuk melanjutkan research",
+          { seedKeyword: run.seedKeyword, reason: "disabled_by_user" }
         );
       }
-
-      const suggestionResult = await collectSuggestions(
-        page,
-        researchRunId,
-        run.seedKeyword,
-        run.maxSuggestions,
-        autocompletePrefixLimit,
-        selectorTimeout,
-        diagnostics
-      );
       const suggestionRows = suggestionResult.rows;
       await persistSuggestions(researchRunId, suggestionRows, run.locale);
       await appendResearchEvent(

@@ -1,0 +1,1 @@
+ALTER TABLE `research_runs` ADD `autocomplete_enabled` integer DEFAULT true NOT NULL;

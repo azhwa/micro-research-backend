@@ -34,6 +34,7 @@ export const researchRuns = sqliteTable(
     locale: text("locale").notNull().default("en-US"),
     maxSuggestions: integer("max_suggestions").notNull().default(30),
     assetsPerQuery: integer("assets_per_query").notNull().default(30),
+    autocompleteEnabled: integer("autocomplete_enabled", { mode: "boolean" }).notNull().default(true),
     mode: text("mode").notNull().default("full"),
     status: text("status").notNull().default("pending"),
     progressTotal: integer("progress_total").notNull().default(0),

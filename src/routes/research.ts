@@ -25,6 +25,7 @@ interface CreateResearchBody {
   locale?: unknown;
   maxSuggestions?: unknown;
   assetsPerQuery?: unknown;
+  autocompleteEnabled?: unknown;
   mode?: unknown;
 }
 
@@ -49,6 +50,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
         : "en-GB";
       const maxSuggestions = positiveInteger(body.maxSuggestions, 30);
       const assetsPerQuery = positiveInteger(body.assetsPerQuery, 30);
+      const autocompleteEnabled = body.autocompleteEnabled !== false;
       const mode: ResearchMode = body.mode === "fast" ? "fast" : "full";
 
       if (!keyword || keyword.length > 120) {
@@ -74,6 +76,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
         locale,
         maxSuggestions,
         assetsPerQuery,
+        autocompleteEnabled,
         mode
       });
 

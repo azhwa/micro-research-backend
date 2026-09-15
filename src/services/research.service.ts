@@ -28,6 +28,7 @@ export interface CreateResearchInput {
   locale: string;
   maxSuggestions: number;
   assetsPerQuery: number;
+  autocompleteEnabled: boolean;
   mode: ResearchMode;
 }
 
@@ -53,6 +54,7 @@ export async function createResearchRun(input: CreateResearchInput) {
     locale: input.locale,
     maxSuggestions: input.maxSuggestions,
     assetsPerQuery: input.assetsPerQuery,
+    autocompleteEnabled: input.autocompleteEnabled,
     mode: input.mode,
     status: "pending"
   });
