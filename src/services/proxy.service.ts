@@ -7,6 +7,7 @@ import { env } from "../config/env";
 
 const PROXY_PROTOCOLS = new Set(["http:", "https:", "socks5:", "socks5h:"]);
 const ADOBE_TEST_URL = "https://stock.adobe.com/search/images?k=cat&limit=5&search_page=1&search_type=usertyped";
+const PROXY_TEST_TIMEOUT_MS = 60_000;
 
 function encryptionKey(): Buffer {
   const value = env.geminiEncryptionKey.trim();
@@ -217,19 +218,29 @@ export async function testProxyEndpoint(id: string) {
     const page = await browser.newPage();
     const response = await page.goto(ADOBE_TEST_URL, {
       waitUntil: "domcontentloaded",
-      timeout: 20_000
+      timeout: PROXY_TEST_TIMEOUT_MS
     });
+    await page
+      .waitForSelector('[data-content-id]', { timeout: 15_000 })
+      .catch(() => undefined);
     const statusCode = response?.status() ?? null;
     const pageTitle = await page.title().catch(() => "");
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const assetCount = await page.locator("[data-content-id]").count().catch(() => 0);
     const html = await page.content().catch(() => "");
-    const challengeDetected = statusCode === 403
-      || /captcha-delivery\.com|DataDome CAPTCHA|verify you are human|access denied/i.test(
-        `${pageTitle} ${html.slice(0, 20_000)}`
-      );
-    const ok = statusCode !== null && statusCode >= 200 && statusCode < 400 && !challengeDetected;
+    const pageUsable = assetCount > 0 || /results?\s+for\b/i.test(bodyText);
+    const challengeMarkers = /captcha-delivery\.com|DataDome CAPTCHA|verify you are human|access denied/i.test(
+      `${pageTitle} ${bodyText.slice(0, 2_000)} ${html.slice(0, 20_000)}`
+    );
+    // Adobe can return HTTP 403 while still rendering a usable results page.
+    // Only treat it as a bot challenge when the page has no usable results.
+    const challengeDetected = !pageUsable && (statusCode === 403 || challengeMarkers);
+    const acceptableStatus = statusCode !== null
+      && ((statusCode >= 200 && statusCode < 400) || (statusCode === 403 && pageUsable));
+    const ok = acceptableStatus && pageUsable && !challengeDetected;
     const lastError = ok
       ? null
-      : `Adobe test gagal${statusCode ? ` HTTP ${statusCode}` : ""}${challengeDetected ? " (challenge/bot detected)" : ""}`;
+      : `Adobe test gagal${statusCode ? ` HTTP ${statusCode}` : ""}${challengeDetected ? " (challenge/bot detected)" : " (hasil Adobe tidak ditemukan)"}`;
 
     const [updated] = await getDatabase().update(proxyEndpoints).set({
       lastTestAt: testedAt,
@@ -244,7 +255,10 @@ export async function testProxyEndpoint(id: string) {
       ok,
       statusCode,
       pageTitle,
-      message: lastError ?? "Proxy berhasil terhubung ke Adobe Stock"
+      pageUsable,
+      assetCount,
+      challengeDetected,
+      message: lastError ?? `Proxy berhasil terhubung ke Adobe Stock${statusCode === 403 ? "; Adobe mengirim 403 tetapi halaman hasil tersedia" : ""}`
     };
   } catch (error) {
     const lastError = error instanceof Error ? error.message : "Proxy test gagal";

@@ -22,7 +22,9 @@ module.exports = {
       env_production: {
         NODE_ENV: "production",
         HOST: "0.0.0.0",
-        PORT: 3315
+        PORT: 3315,
+        DISPLAY: ":99",
+        PLAYWRIGHT_HEADLESS: "false"
       }
     }
   ]

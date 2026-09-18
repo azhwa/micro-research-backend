@@ -14,10 +14,40 @@ import {
 interface CreateProxyBody {
   label?: unknown;
   proxyUrl?: unknown;
+  protocol?: unknown;
+  host?: unknown;
+  port?: unknown;
+  username?: unknown;
+  password?: unknown;
 }
 
 interface StatusBody {
   status?: unknown;
+}
+
+function textValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function proxyUrlFromBody(body: CreateProxyBody | undefined): string {
+  const legacyUrl = textValue(body?.proxyUrl);
+  if (legacyUrl) return legacyUrl;
+
+  const protocol = textValue(body?.protocol) || "http";
+  const host = textValue(body?.host);
+  const port = textValue(body?.port);
+  const username = textValue(body?.username);
+  const password = textValue(body?.password);
+
+  if (!host && !port && !username && !password) return "";
+  if (!host || !port) {
+    throw new Error("Host dan port proxy wajib diisi");
+  }
+
+  const credentials = username || password
+    ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+    : "";
+  return `${protocol}://${credentials}${host}:${port}`;
 }
 
 export async function proxyRoutes(app: FastifyInstance): Promise<void> {
@@ -40,8 +70,8 @@ export async function proxyRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requireAdmin },
     async (request, reply) => {
       const label = typeof request.body?.label === "string" ? request.body.label : "Proxy";
-      const proxyUrl = typeof request.body?.proxyUrl === "string" ? request.body.proxyUrl : "";
       try {
+        const proxyUrl = proxyUrlFromBody(request.body);
         const result = await createProxyEndpoint(request.auth?.userId ?? "", label, proxyUrl);
         return reply.status(201).send(result);
       } catch (error) {
