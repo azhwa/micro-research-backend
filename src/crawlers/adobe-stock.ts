@@ -746,13 +746,26 @@ async function collectSearchResults(
   // own dropdown. Sending `order=...` directly is unreliable with Adobe's
   // bot protection and does not always match the UI state.
   const isPageOne = query.trim() === "";
-  const { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
+  let { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
     page,
     assetType,
     locale,
     navigationTimeout,
     isPageOne
   );
+  // Standard keyword research submits the search again before each sort,
+  // which resets Adobe's SPA state. Page One has no keyword to submit, so
+  // reload the current clean result page before changing from one sort to the
+  // next. Without this reset Adobe can leave the native select disabled at
+  // the previous `order` value (usually relevance).
+  if (isPageOne && new URL(page.url()).searchParams.has("order")) {
+    const response = await page.reload({
+      waitUntil: "domcontentloaded",
+      timeout: navigationTimeout
+    });
+    httpStatus = response?.status() ?? httpStatus;
+    searchInputReady = await waitForAdobeSearchInput(page);
+  }
   const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
   if (!searchInputReady) {
     const diagnostics = await getPageDiagnostics(page, httpStatus);
