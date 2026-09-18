@@ -47,7 +47,7 @@ export interface ResearchSummary {
   runId: string; scoringVersion: string; generatedAt: string;
   dataAge: { firstObservedAt: Date | null; lastObservedAt: Date | null; dataAgeDays: number | null; status: "fresh" | "aging" | "stale" | "refresh_recommended" | "unknown"; refreshRecommended: boolean };
   totals: { suggestions: number; queries: number; expectedQueries: number; uniqueAssets: number; keywords: number; scoredKeywords: number };
-  dataQuality: { queryCoveragePct: number; keywordCoveragePct: number; completenessScore: number; confidence: Confidence; warnings: string[]; downloadsAssets: number; assetsWithKeywords: number; missingKeywordAssets: number; resultCountsAvailable: number };
+  dataQuality: { queryCoveragePct: number; keywordCoveragePct: number; completenessScore: number; confidence: Confidence; warnings: string[]; downloadsAssets: number; observedAssets: number; assetsWithKeywords: number; missingKeywordAssets: number; resultCountsAvailable: number };
   scores: { demandScore: number | null; competitionScore: number | null; freshnessScore: number | null; consistencyScore: number | null; opportunityScore: number | null };
   topKeywords: KeywordOpportunity[]; topAssets: AssetOpportunity[];
 }
@@ -310,16 +310,17 @@ export async function getResearchInsights(runId: string, limit = 20) {
   const assetOpportunities = buildAssetOpportunities(data.queries, data.observations, data.keywords);
   const completedQueries = data.queries.filter((row) => row.isComplete && row.collectionStatus === "completed");
   const downloadAssets = new Set(data.observations.filter((row) => row.sortMode === "downloads").map((row) => row.assetId));
+  const observedAssets = new Set(data.observations.map((row) => row.assetId));
   const assetsWithKeywords = new Set(data.keywords.map((row) => row.assetId));
   const expectedQueries = run.progressTotal || data.suggestions.length * (run.mode === "fast" ? 1 : 3);
   const queryCoveragePct = expectedQueries ? round(clamp((completedQueries.length / expectedQueries) * 100)) : 0;
-  const keywordCoveragePct = downloadAssets.size ? round((assetsWithKeywords.size / downloadAssets.size) * 100) : 0;
+  const keywordCoveragePct = observedAssets.size ? round(([...assetsWithKeywords].filter((id) => observedAssets.has(id)).length / observedAssets.size) * 100) : 0;
   const resultCountsAvailable = completedQueries.filter((row) => row.resultCount !== null).length;
   const completenessScore = round(queryCoveragePct * 0.55 + keywordCoveragePct * 0.25 + (expectedQueries ? clamp((resultCountsAvailable / expectedQueries) * 100) : 0) * 0.2);
   const confidence: Confidence = completenessScore >= 85 && expectedQueries >= 9 ? "high" : completenessScore >= 60 ? "medium" : "low";
   const warnings: string[] = [];
   if (queryCoveragePct < 100) warnings.push("Sebagian query belum selesai atau gagal diproses.");
-  if (keywordCoveragePct < 80) warnings.push("Keyword detail belum tersedia untuk sebagian besar asset Downloads.");
+  if (keywordCoveragePct < 80) warnings.push("Keyword detail belum tersedia untuk sebagian besar asset yang diamati.");
   if (resultCountsAvailable < completedQueries.length) warnings.push("Sebagian query tidak memiliki result count yang dapat dibaca.");
   if (run.mode === "fast") warnings.push("Mode Fast hanya mengamati Downloads; cross-sort dan score penuh belum tersedia.");
   const dates = [...data.queries.map((row) => row.observedAt), ...data.observations.map((row) => row.observedAt)];
@@ -329,7 +330,7 @@ export async function getResearchInsights(runId: string, limit = 20) {
     runId, scoringVersion: SCORING_VERSION, generatedAt: new Date().toISOString(),
     dataAge: { firstObservedAt, lastObservedAt, dataAgeDays: age.ageDays, status: age.status, refreshRecommended: age.refreshRecommended },
     totals: { suggestions: data.suggestions.length, queries: completedQueries.length, expectedQueries, uniqueAssets: new Set(data.observations.map((row) => row.assetId)).size, keywords: data.keywords.length, scoredKeywords: scoredKeywords.length },
-    dataQuality: { queryCoveragePct, keywordCoveragePct, completenessScore, confidence, warnings, downloadsAssets: downloadAssets.size, assetsWithKeywords: [...assetsWithKeywords].filter((id) => downloadAssets.has(id)).length, missingKeywordAssets: [...downloadAssets].filter((id) => !assetsWithKeywords.has(id)).length, resultCountsAvailable },
+    dataQuality: { queryCoveragePct, keywordCoveragePct, completenessScore, confidence, warnings, downloadsAssets: downloadAssets.size, observedAssets: observedAssets.size, assetsWithKeywords: [...assetsWithKeywords].filter((id) => observedAssets.has(id)).length, missingKeywordAssets: [...observedAssets].filter((id) => !assetsWithKeywords.has(id)).length, resultCountsAvailable },
     scores: { demandScore: averageNullable(scoredKeywords.map((item) => item.downloadSignalScore)), competitionScore: averageNullable(scoredKeywords.map((item) => item.lowCompetitionScore)), freshnessScore: averageNullable(scoredKeywords.map((item) => item.freshnessSignalScore)), consistencyScore: averageNullable(scoredKeywords.map((item) => item.crossSortScore)), opportunityScore: averageNullable(scoredKeywords.map((item) => item.score)) },
     topKeywords: keywordOpportunities.slice(0, Math.min(Math.max(limit, 1), 500)), topAssets: assetOpportunities.slice(0, Math.min(Math.max(limit, 1), 500))
   } satisfies ResearchSummary;
@@ -459,7 +460,7 @@ async function getSnapshotResearchInsights(run: Awaited<ReturnType<typeof getRes
     generatedAt: new Date().toISOString(),
     dataAge: { firstObservedAt: minDate(dates), lastObservedAt: maxDate(dates), dataAgeDays: age.ageDays, status: age.status, refreshRecommended: age.refreshRecommended },
     totals: { suggestions: keywordRows.length, queries: complete ? expectedQueries : 0, expectedQueries, uniqueAssets: new Set(assetRows.map(({ snapshot }) => snapshot.assetId)).size, keywords: keywordRows.length, scoredKeywords: scoredKeywords.length },
-    dataQuality: { queryCoveragePct: complete ? 100 : 0, keywordCoveragePct: 100, completenessScore: complete ? 100 : 50, confidence: complete ? "medium" : "low", warnings, downloadsAssets: assetRows.length, assetsWithKeywords: assetRows.filter(({ snapshot }) => snapshot.keywordCount > 0).length, missingKeywordAssets: assetRows.filter(({ snapshot }) => snapshot.keywordCount === 0).length, resultCountsAvailable: 0 },
+    dataQuality: { queryCoveragePct: complete ? 100 : 0, keywordCoveragePct: 100, completenessScore: complete ? 100 : 50, confidence: complete ? "medium" : "low", warnings, downloadsAssets: assetRows.length, observedAssets: assetRows.length, assetsWithKeywords: assetRows.filter(({ snapshot }) => snapshot.keywordCount > 0).length, missingKeywordAssets: assetRows.filter(({ snapshot }) => snapshot.keywordCount === 0).length, resultCountsAvailable: 0 },
     scores: { demandScore: averageNullable(scoredKeywords.map((item) => item.downloadSignalScore)), competitionScore: averageNullable(scoredKeywords.map((item) => item.lowCompetitionScore)), freshnessScore: averageNullable(scoredKeywords.map((item) => item.freshnessSignalScore)), consistencyScore: averageNullable(scoredKeywords.map((item) => item.crossSortScore)), opportunityScore: averageNullable(scoredKeywords.map((item) => item.score)) },
     topKeywords: keywordOpportunities.slice(0, Math.min(Math.max(limit, 1), 500)),
     topAssets: assetOpportunities.slice(0, Math.min(Math.max(limit, 1), 500))

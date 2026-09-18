@@ -321,29 +321,16 @@ async function selectAdobeSort(
     const select = page.locator(SORT_SELECT_SELECTOR).first();
 
     try {
-      const state = await page.evaluate(({ selector, value, requestedQuery, resultSelector }) => {
-        const element = document.querySelector(selector);
-        const url = new URL(location.href);
-        const normalizedQuery = requestedQuery.trim().toLowerCase();
-        const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
-
-        return {
-          value: element instanceof HTMLSelectElement ? element.value : null,
-          disabled: element instanceof HTMLSelectElement ? element.disabled : true,
-          optionExists: element instanceof HTMLSelectElement
-            && Array.from(element.options).some((option) => option.value === value),
-          urlSort: url.searchParams.get("order"),
-          queryMatches: currentQuery === normalizedQuery,
-          resultCount: document.querySelectorAll(resultSelector).length
-        };
-      }, { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query, resultSelector: ADOBE_RESULT_SELECTOR });
+      await page.waitForLoadState("domcontentloaded", { timeout: Math.min(remaining, 5_000) }).catch(() => undefined);
+      const state = await readAdobeSortState(page, sortValue, query);
+      const optionExists = await select.locator(`option[value="${sortValue}"]`).count() > 0;
 
       // Adobe can keep the native select disabled while the SPA is rendering,
       // even though it already applied the requested sort to the URL/state.
       // In that case the result loader is the readiness signal, not disabled.
       if (state.value === sortValue && state.urlSort === sortValue && state.queryMatches) return;
 
-      if (!state.disabled && state.optionExists) {
+      if (!state.disabled && optionExists) {
         await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
         await page.waitForFunction(
           ({ selector, value, requestedQuery }) => {
@@ -373,6 +360,175 @@ async function selectAdobeSort(
   throw lastError instanceof Error
     ? lastError
     : new Error(`Dropdown sort Adobe belum siap untuk '${sortValue}'`);
+}
+
+interface AdobeSortState {
+  value: string | null;
+  disabled: boolean;
+  urlSort: string | null;
+  queryMatches: boolean;
+  resultCount: number;
+}
+
+async function readAdobeSortState(page: Page, sortValue: string, query: string): Promise<AdobeSortState> {
+  return page.evaluate(({ selector, value, requestedQuery, resultSelector }) => {
+    const element = document.querySelector(selector);
+    const url = new URL(location.href);
+    const normalizedQuery = requestedQuery.trim().toLowerCase();
+    const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
+
+    return {
+      value: element instanceof HTMLSelectElement ? element.value : null,
+      disabled: element instanceof HTMLSelectElement ? element.disabled : true,
+      urlSort: url.searchParams.get("order"),
+      queryMatches: currentQuery === normalizedQuery,
+      resultCount: document.querySelectorAll(resultSelector).length
+    };
+  }, { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query, resultSelector: ADOBE_RESULT_SELECTOR });
+}
+
+async function currentAdobeSearchState(page: Page): Promise<{ query: string; sort: string | null }> {
+  return page.evaluate(() => {
+    const url = new URL(location.href);
+    return {
+      query: (url.searchParams.get("k") || "").trim().toLowerCase(),
+      sort: url.searchParams.get("order")
+    };
+  }).catch(() => ({ query: "", sort: null }));
+}
+
+async function prepareAdobeQuery(
+  page: Page,
+  query: string,
+  assetType: string,
+  locale: string,
+  sortValue: string,
+  navigationTimeout: number
+): Promise<{ httpStatus: number | null }> {
+  const isPageOne = query.trim() === "";
+  let { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
+    page,
+    assetType,
+    locale,
+    navigationTimeout,
+    isPageOne
+  );
+
+  if (!searchInputReady) {
+    throw new CrawlerStageError(
+      `Halaman Adobe belum siap setelah menunggu challenge ${ADOBE_CHALLENGE_WAIT_MS}ms pada ${page.url()}`,
+      "selector_timeout"
+    );
+  }
+
+  const currentState = await currentAdobeSearchState(page);
+  if (isPageOne && currentState.sort && currentState.sort !== sortValue) {
+    const response = await page.reload({
+      waitUntil: "domcontentloaded",
+      timeout: navigationTimeout
+    });
+    httpStatus = response?.status() ?? httpStatus;
+    searchInputReady = await waitForAdobeSearchInput(page);
+    if (!searchInputReady) {
+      throw new CrawlerStageError(
+        `Halaman Page One Adobe belum siap pada ${page.url()}`,
+        "selector_timeout"
+      );
+    }
+  }
+
+  if (!isPageOne) {
+    const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
+    if (currentState.query === query.trim().toLowerCase() && currentState.sort) {
+      const response = await page.reload({
+        waitUntil: "domcontentloaded",
+        timeout: navigationTimeout
+      });
+      httpStatus = response?.status() ?? httpStatus;
+      searchInputReady = await waitForAdobeSearchInput(page);
+    }
+    if (!searchInputReady) {
+      throw new CrawlerStageError(
+        `Input pencarian Adobe belum siap pada ${page.url()}`,
+        "selector_timeout"
+      );
+    }
+    try {
+      await input.fill(query);
+      await input.press("Enter");
+      await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+    } catch (error) {
+      throw new CrawlerStageError(
+        `Input pencarian Adobe tidak dapat digunakan pada ${page.url()}: ${errorMessage(error)}`,
+        classifyFailure(error) === "timeout" ? "selector_timeout" : "navigation_error"
+      );
+    }
+    if (!await waitForAdobeSearchInput(page, Math.min(navigationTimeout, ADOBE_CHALLENGE_WAIT_MS))) {
+      throw new CrawlerStageError(
+        `Hasil pencarian Adobe belum siap pada ${page.url()}`,
+        "navigation_error"
+      );
+    }
+  }
+
+  return { httpStatus };
+}
+
+async function settleAdobeSort(
+  page: Page,
+  query: string,
+  sortValue: string,
+  navigationTimeout: number,
+  selectorTimeout: number
+): Promise<void> {
+  const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
+  const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
+      const initialSortState = await readAdobeSortState(page, sortValue, query);
+      const sortTimeout = attempt === 1
+        ? Math.min(selectorTimeout, 8_000)
+        : Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS);
+      await selectAdobeSort(page, sortValue, sortTimeout, query);
+      await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+      const resultReady = await waitForAdobeResults(
+        page,
+        query,
+        sortValue,
+        resultSelectorTimeout,
+        !(initialSortState.value === sortValue
+          && initialSortState.urlSort === sortValue
+          && initialSortState.queryMatches)
+      );
+      if (!resultReady) {
+        throw new Error(`Hasil Adobe belum siap setelah sort '${sortValue}'`);
+      }
+
+      const selectedSortValue = await sortSelect.inputValue();
+      const currentUrlSort = new URL(page.url()).searchParams.get("order");
+      if (selectedSortValue !== sortValue && currentUrlSort !== sortValue) {
+        throw new Error(`Adobe memilih sort '${selectedSortValue}', expected '${sortValue}'`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+
+      await page.waitForTimeout(1_000);
+      const currentState = await currentAdobeSearchState(page);
+      if (currentState.sort !== sortValue) {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: navigationTimeout });
+        await waitForAdobeSearchInput(page);
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Adobe sort '${sortValue}' gagal`);
 }
 
 async function waitForAdobeResults(
@@ -745,84 +901,19 @@ async function collectSearchResults(
   // requested keyword first, then both flows choose the sort from Adobe's
   // own dropdown. Sending `order=...` directly is unreliable with Adobe's
   // bot protection and does not always match the UI state.
-  const isPageOne = query.trim() === "";
   const sortValue = adobeSortValue(sortMode);
-  let { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
+  const { httpStatus } = await prepareAdobeQuery(
     page,
+    query,
     assetType,
     locale,
-    navigationTimeout,
-    isPageOne
+    sortValue,
+    navigationTimeout
   );
-  // Standard keyword research submits the search again before each sort,
-  // which resets Adobe's SPA state. Page One has no keyword to submit, so
-  // reload the current clean result page before changing from one sort to the
-  // next. Without this reset Adobe can leave the native select disabled at
-  // the previous `order` value (usually relevance).
-  const currentSort = new URL(page.url()).searchParams.get("order");
-  if (isPageOne && currentSort && currentSort !== sortValue) {
-    const response = await page.reload({
-      waitUntil: "domcontentloaded",
-      timeout: navigationTimeout
-    });
-    httpStatus = response?.status() ?? httpStatus;
-    searchInputReady = await waitForAdobeSearchInput(page);
-  }
-  const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
-  if (!searchInputReady) {
-    const diagnostics = await getPageDiagnostics(page, httpStatus);
-    throw new CrawlerStageError(
-      `Halaman Adobe belum siap setelah menunggu challenge ${ADOBE_CHALLENGE_WAIT_MS}ms pada ${diagnostics.url}`,
-      diagnostics.botDetected ? "bot_detected" : "selector_timeout"
-    );
-  }
-
-  if (!isPageOne) {
-    try {
-      await input.fill(query);
-      await input.press("Enter");
-      await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-    } catch (error) {
-      const diagnostics = await getPageDiagnostics(page, httpStatus);
-      throw new CrawlerStageError(
-        `Input pencarian Adobe tidak dapat digunakan pada ${diagnostics.url}: ${errorMessage(error)}`,
-        classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
-      );
-    }
-  }
-
-  const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
   const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
-  try {
-    await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
-    const initialSortState = await page.evaluate(({ selector, value, requestedQuery }) => {
-      const element = document.querySelector(selector);
-      const url = new URL(location.href);
-      return {
-        alreadyApplied: element instanceof HTMLSelectElement
-          && element.value === value
-          && url.searchParams.get("order") === value
-          && (url.searchParams.get("k") || "").trim().toLowerCase() === requestedQuery.trim().toLowerCase()
-      };
-    }, { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query });
-    await selectAdobeSort(page, sortValue, Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS), query);
-    await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-    const resultReady = await waitForAdobeResults(
-      page,
-      query,
-      sortValue,
-      resultSelectorTimeout,
-      !initialSortState.alreadyApplied
-    );
-    if (!resultReady) {
-      throw new Error(`Hasil Adobe belum siap setelah sort '${sortValue}'`);
-    }
 
-    const selectedSortValue = await sortSelect.inputValue();
-    const currentUrlSort = new URL(page.url()).searchParams.get("order");
-    if (selectedSortValue !== sortValue && currentUrlSort !== sortValue) {
-      throw new Error(`Adobe memilih sort '${selectedSortValue}', expected '${sortValue}'`);
-    }
+  try {
+    await settleAdobeSort(page, query, sortValue, navigationTimeout, selectorTimeout);
   } catch (error) {
     const diagnostics = await getPageDiagnostics(page, httpStatus);
     throw new CrawlerStageError(
@@ -1245,13 +1336,14 @@ interface ResearchHooks {
   onQueryProgress?: (completed: number, total: number) => Promise<void>;
 }
 
-interface ExistingDownloadAsset extends CollectedAsset {
+interface ExistingSearchAsset extends CollectedAsset {
   query: string;
+  sortMode: SortMode;
 }
 
 async function loadResumeState(researchRunId: string) {
   const database = getDatabase();
-  const [completedRows, keywordRows, downloadRows] = await Promise.all([
+  const [completedRows, keywordRows, searchAssetRows] = await Promise.all([
     database
       .select({ query: searchQueries.query, sortMode: searchQueries.sortMode })
       .from(searchQueries)
@@ -1264,6 +1356,7 @@ async function loadResumeState(researchRunId: string) {
     database
       .select({
         query: searchQueries.query,
+        sortMode: searchQueries.sortMode,
         externalId: assets.externalId,
         title: assets.title,
         assetUrl: assets.assetUrl,
@@ -1276,14 +1369,16 @@ async function loadResumeState(researchRunId: string) {
       .from(searchQueries)
       .innerJoin(assetObservations, eq(assetObservations.searchQueryId, searchQueries.id))
       .innerJoin(assets, eq(assets.id, assetObservations.assetId))
-      .where(and(eq(searchQueries.researchRunId, researchRunId), eq(searchQueries.sortMode, "downloads")))
+      .where(and(eq(searchQueries.researchRunId, researchRunId), eq(searchQueries.isComplete, true)))
   ]);
 
-  const downloadAssetsByQuery = new Map<string, ExistingDownloadAsset[]>();
-  for (const row of downloadRows) {
-    const current = downloadAssetsByQuery.get(row.query) ?? [];
+  const assetsByQueryAndSort = new Map<string, ExistingSearchAsset[]>();
+  for (const row of searchAssetRows) {
+    const key = `${row.query}\u001f${row.sortMode}`;
+    const current = assetsByQueryAndSort.get(key) ?? [];
     current.push({
       query: row.query,
+      sortMode: row.sortMode as SortMode,
       externalId: row.externalId,
       title: row.title,
       assetUrl: row.assetUrl,
@@ -1293,13 +1388,13 @@ async function loadResumeState(researchRunId: string) {
       fileExtension: row.fileExtension,
       isPremium: row.isPremium
     });
-    downloadAssetsByQuery.set(row.query, current);
+    assetsByQueryAndSort.set(key, current);
   }
 
   return {
     completedKeys: new Set(completedRows.map((row) => `${row.query}\u001f${row.sortMode}`)),
     enrichedAssetIds: new Set(keywordRows.map((row) => row.externalId)),
-    downloadAssetsByQuery
+    assetsByQueryAndSort
   };
 }
 
@@ -1312,7 +1407,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   const autocompletePrefixLimit = mode === "fast" ? 5 : 27;
   const navigationTimeout = mode === "fast" ? 20_000 : 30_000;
   const selectorTimeout = mode === "fast" ? 8_000 : 15_000;
-  const keywordDetailLimit = mode === "fast" ? 1 : mode === "primary" ? 50 : Number.POSITIVE_INFINITY;
+  const keywordDetailLimitPerSort = mode === "fast" ? 1 : mode === "primary" ? 50 : Number.POSITIVE_INFINITY;
 
   let requestHandled = false;
   let requestSucceeded = false;
@@ -1476,13 +1571,14 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       let keywordSuccess = 0;
       let keywordEmpty = 0;
       let keywordFailed = 0;
-      const enrichDownloadAssets = async (items: CollectedAsset[]) => {
-        let attempted = 0;
+      const enrichAssetsForSort = async (items: CollectedAsset[], sortMode: SortMode) => {
+        let selected = 0;
+        let fetched = 0;
         for (const item of items) {
-          if (attempted >= keywordDetailLimit) break;
+          if (selected >= keywordDetailLimitPerSort) break;
+          selected += 1;
           if (enrichedAssetIds.has(item.externalId)) continue;
-          enrichedAssetIds.add(item.externalId);
-          attempted += 1;
+          fetched += 1;
           const status = await collectAndPersistAssetKeywords(
             page,
             researchRunId,
@@ -1493,8 +1589,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           if (status === "success") keywordSuccess += 1;
           if (status === "empty") keywordEmpty += 1;
           if (status === "failed") keywordFailed += 1;
+          if (status !== "failed") enrichedAssetIds.add(item.externalId);
         }
-        return attempted;
+        return { selected, fetched, sortMode };
       };
       for (const suggestion of queryTargets) {
         const queryLabel = suggestion.suggestion || "Page One";
@@ -1507,8 +1604,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
           const queryKey = `${suggestion.suggestion}\u001f${sortMode}`;
           if (resumeState.completedKeys.has(queryKey)) {
-            if (sortMode === "downloads") {
-              await enrichDownloadAssets(resumeState.downloadAssetsByQuery.get(suggestion.suggestion) ?? []);
+            const resumedAssets = resumeState.assetsByQueryAndSort.get(queryKey) ?? [];
+            if (resumedAssets.length) {
+              await enrichAssetsForSort(resumedAssets, sortMode);
             }
             await appendResearchEvent(
               researchRunId,
@@ -1584,22 +1682,22 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             }
           );
 
-          if (sortMode === "downloads") {
-            const attempted = await enrichDownloadAssets(searchResult.assets);
-            if (attempted > 0) {
-              await appendResearchEvent(
-                researchRunId,
-                "info",
-                "keyword_enrichment_progress",
-                `Keyword detail diproses untuk ${attempted} asset Downloads`,
-                {
-                  attempted,
-                  success: keywordSuccess,
-                  empty: keywordEmpty,
-                  failed: keywordFailed
-                }
-              );
-            }
+          const enrichment = await enrichAssetsForSort(searchResult.assets, sortMode);
+          if (enrichment.selected > 0) {
+            await appendResearchEvent(
+              researchRunId,
+              "info",
+              "keyword_enrichment_progress",
+              `Keyword detail diproses untuk ${enrichment.selected} asset ${sortMode}`,
+              {
+                selected: enrichment.selected,
+                fetched: enrichment.fetched,
+                sortMode,
+                success: keywordSuccess,
+                empty: keywordEmpty,
+                failed: keywordFailed
+              }
+            );
           }
 
           await randomJitter(700, 1800);
