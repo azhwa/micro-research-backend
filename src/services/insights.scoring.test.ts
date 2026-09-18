@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { calculateKeywordSignalScore, calculateOpportunityScore } from "./insights.service";
+import { calculateDiscoveryScore, calculateKeywordSignalScore, calculateOpportunityScore } from "./insights.service";
 import { lowCompetitionScore, normalizeKeyword, parseAdobeResultCount, rankSignal } from "./research-metrics";
 
 const strong = calculateOpportunityScore({
@@ -35,6 +35,13 @@ const candidate = calculateKeywordSignalScore({
   autocompleteScore: 90
 });
 assert.equal(candidate, 75.5);
+
+assert.equal(calculateDiscoveryScore({
+  rankSignalScore: 80,
+  frequencyScore: 60,
+  crossSortScore: 100,
+  keywordPositionScore: 50
+}), 73);
 
 assert.deepEqual(parseAdobeResultCount("1,000,000+ results"), {
   value: 1_000_000,

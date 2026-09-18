@@ -212,7 +212,7 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
   const database = getDatabase();
   const conditions = [];
   conditions.push(eq(keywordOpportunitySnapshots.scoringVersion, SCORING_VERSION));
-  conditions.push(inArray(keywordOpportunitySnapshots.scoreStatus, ["provisional", "scored"]));
+  conditions.push(inArray(keywordOpportunitySnapshots.scoreStatus, ["provisional", "scored", "discovery"]));
   const scope = researchScopeCondition(auth);
   if (scope) conditions.push(scope);
   if (options.assetType && options.assetType !== "all") conditions.push(eq(keywordOpportunitySnapshots.assetType, options.assetType));

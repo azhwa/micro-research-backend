@@ -1,12 +1,12 @@
 import { asc, eq } from "drizzle-orm";
-import { assetKeywords, assetObservations, assets, searchQueries, suggestions } from "../db/schema";
+import { assetKeywords, assetObservations, assets, assetOpportunitySnapshots, keywordOpportunitySnapshots, searchQueries, suggestions } from "../db/schema";
 import { getDatabase } from "../db/client";
 import { getResearchRun } from "./research.service";
 import { dataAgeStatus, lowCompetitionScore, normalizeKeyword, rankSignal, type ResultCountQualifier } from "./research-metrics";
 
 type SortMode = "downloads" | "relevance" | "recent";
 type Confidence = "low" | "medium" | "high";
-type ScoreStatus = "scored" | "provisional" | "insufficient_data" | "not_directly_researched";
+type ScoreStatus = "scored" | "provisional" | "discovery" | "insufficient_data" | "not_directly_researched";
 type KeywordLevel = 0 | 1 | 2 | 3 | 4 | 5;
 export const SCORING_VERSION = "candidate-v2";
 
@@ -75,6 +75,10 @@ export function calculateKeywordSignalScore(input: { downloadSignalScore: number
   return round(input.downloadSignalScore * 0.25 + input.lowCompetitionScore * 0.25 + input.relevanceSignalScore * 0.15 + input.freshnessSignalScore * 0.1 + input.crossSortScore * 0.15 + input.autocompleteScore * 0.1);
 }
 
+export function calculateDiscoveryScore(input: { rankSignalScore: number; frequencyScore: number; crossSortScore: number; keywordPositionScore: number }) {
+  return round(input.rankSignalScore * 0.35 + input.frequencyScore * 0.25 + input.crossSortScore * 0.2 + input.keywordPositionScore * 0.2);
+}
+
 /** Kept for compatibility with existing imports. New insights use calculateKeywordSignalScore. */
 export function calculateOpportunityScore(input: { demandScore: number; freshnessScore: number; consistencyScore: number; competitionScore: number }) {
   return round(input.demandScore * 0.4 + input.freshnessScore * 0.2 + input.consistencyScore * 0.2 + input.competitionScore * 0.2);
@@ -140,6 +144,13 @@ function buildKeywordOpportunities(seedKeyword: string, suggestionsRows: Suggest
     const downloadRanks = ranks("downloads");
     const relevanceRanks = ranks("relevance");
     const recentRanks = ranks("recent");
+    const modeRankSignal = (mode: SortMode) => {
+      const values = supportingObservations
+        .filter((row) => row.sortMode === mode)
+        .map((row) => rankSignal(row.rank, row.requestedLimit || 100))
+        .filter((value): value is number => value !== null);
+      return values.length ? round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+    };
     const bestDownloadRank = downloadRanks.length ? Math.min(...downloadRanks) : null;
     const bestRelevanceRank = relevanceRanks.length ? Math.min(...relevanceRanks) : null;
     const bestRecentRank = recentRanks.length ? Math.min(...recentRanks) : null;
@@ -175,14 +186,47 @@ function buildKeywordOpportunities(seedKeyword: string, suggestionsRows: Suggest
     const directlyResearched = directQueries.length > 0;
     const allSignalsAvailable = evaluatedModes.size === 3 && downloadScore !== null && relevanceScore !== null && freshnessScore !== null && competition !== null && crossScore !== null && autocompleteScore !== null;
     const score = allSignalsAvailable ? calculateKeywordSignalScore({ downloadSignalScore: downloadScore, lowCompetitionScore: competition, relevanceSignalScore: relevanceScore, freshnessSignalScore: freshnessScore, crossSortScore: crossScore, autocompleteScore }) : null;
-    const scoreStatus: ScoreStatus = !directlyResearched ? "not_directly_researched" : score !== null ? "provisional" : "insufficient_data";
-    const level = keywordLevel(score);
+    const discoveryModesByAsset = new Map<string, Set<string>>();
+    for (const observation of supportingObservations) {
+      const modes = discoveryModesByAsset.get(observation.assetId) ?? new Set<string>();
+      modes.add(observation.sortMode);
+      discoveryModesByAsset.set(observation.assetId, modes);
+    }
+    const discoveryRankScore = (() => {
+      const weighted = [
+        { value: modeRankSignal("downloads"), weight: 0.5 },
+        { value: modeRankSignal("relevance"), weight: 0.3 },
+        { value: modeRankSignal("recent"), weight: 0.2 }
+      ].filter((part): part is { value: number; weight: number } => part.value !== null);
+      const totalWeight = weighted.reduce((sum, part) => sum + part.weight, 0);
+      return totalWeight ? round(weighted.reduce((sum, part) => sum + part.value * part.weight, 0) / totalWeight) : null;
+    })();
+    const discoveryFrequencyScore = enrichedAssetIds.size
+      ? round(clamp((candidate.assetIds.size / enrichedAssetIds.size) * 100))
+      : null;
+    const discoveryCrossSortScore = candidate.assetIds.size
+      ? round([...candidate.assetIds].reduce((sum, assetId) => sum + ((discoveryModesByAsset.get(assetId)?.size ?? 0) / 3) * 100, 0) / candidate.assetIds.size)
+      : null;
+    const discoveryPositionRows = keywordRows
+      .filter((row) => normalizeKeyword(row.normalizedKeyword || row.keyword) === normalizedKeyword)
+      .map((row) => row.position <= 5 ? 100 : row.position <= 15 ? 50 : 15);
+    const discoveryPositionScore = discoveryPositionRows.length
+      ? round(discoveryPositionRows.reduce((sum, value) => sum + value, 0) / discoveryPositionRows.length)
+      : null;
+    const discoveryScore = !directlyResearched && discoveryRankScore !== null && discoveryFrequencyScore !== null && discoveryCrossSortScore !== null && discoveryPositionScore !== null
+      ? calculateDiscoveryScore({ rankSignalScore: discoveryRankScore, frequencyScore: discoveryFrequencyScore, crossSortScore: discoveryCrossSortScore, keywordPositionScore: discoveryPositionScore })
+      : null;
+    const finalScore = directlyResearched ? score : discoveryScore;
+    const scoreStatus: ScoreStatus = directlyResearched
+      ? score !== null ? "provisional" : "insufficient_data"
+      : discoveryScore !== null ? "discovery" : "not_directly_researched";
+    const level = keywordLevel(finalScore);
     const evidenceDates = [...candidate.dates, ...directQueries.map((row) => row.observedAt), ...supportingObservations.map((row) => row.observedAt)];
     return {
       keyword: candidate.keyword, normalizedKeyword, source: [...candidate.sources].join(", "), isSeed: candidate.isSeed,
-      researchStatus: directlyResearched ? "directly_researched" : "discovered", scoreStatus, rank: null, score, opportunityScore: score,
-      level: level.level, label: scoreStatus === "not_directly_researched" ? "Belum diriset langsung" : level.label, indicator: level.indicator,
-      confidence: score === null ? "low" : supportingObservations.length >= 30 ? "high" : "medium",
+      researchStatus: directlyResearched ? "directly_researched" : "discovered", scoreStatus, rank: null, score: finalScore, opportunityScore: finalScore,
+      level: level.level, label: scoreStatus === "discovery" ? "Discovery evidence" : scoreStatus === "not_directly_researched" ? "Belum diriset langsung" : level.label, indicator: level.indicator,
+      confidence: finalScore === null ? "low" : supportingObservations.length >= 30 ? "high" : "medium",
       autocompletePosition, suggestionFrequency: candidate.prefixes.size, queryCount: new Set(directQueries.map((row) => row.query)).size,
       assetCount: candidate.assetIds.size, supportingAssetCount: candidate.assetIds.size, enrichedSampleCount: enrichedAssetIds.size,
       bestDownloadRank, averageDownloadRank: averageNullable(downloadRanks), bestRecentRank, bestRelevanceRank,
@@ -258,6 +302,10 @@ export async function getResearchInsights(runId: string, limit = 20) {
   const run = await getResearchRun(runId);
   if (!run) return null;
   const data = await loadResearchData(runId);
+  if (!data.queries.length && !data.observations.length && !data.suggestions.length) {
+    const snapshotInsights = await getSnapshotResearchInsights(run, limit);
+    if (snapshotInsights) return snapshotInsights;
+  }
   const keywordOpportunities = buildKeywordOpportunities(run.seedKeyword, data.suggestions, data.keywords, data.queries, data.observations);
   const assetOpportunities = buildAssetOpportunities(data.queries, data.observations, data.keywords);
   const completedQueries = data.queries.filter((row) => row.isComplete && row.collectionStatus === "completed");
@@ -287,11 +335,142 @@ export async function getResearchInsights(runId: string, limit = 20) {
   } satisfies ResearchSummary;
 }
 
+async function getSnapshotResearchInsights(run: Awaited<ReturnType<typeof getResearchRun>>, limit: number): Promise<ResearchSummary | null> {
+  if (!run) return null;
+  const database = getDatabase();
+  const [keywordRows, assetRows] = await Promise.all([
+    database.select().from(keywordOpportunitySnapshots).where(eq(keywordOpportunitySnapshots.researchRunId, run.id)),
+    database
+      .select({ snapshot: assetOpportunitySnapshots, asset: assets })
+      .from(assetOpportunitySnapshots)
+      .innerJoin(assets, eq(assetOpportunitySnapshots.assetId, assets.id))
+      .where(eq(assetOpportunitySnapshots.researchRunId, run.id))
+  ]);
+  if (!keywordRows.length && !assetRows.length) return null;
+
+  const seed = normalizeKeyword(run.seedKeyword);
+  const keywordOpportunities: KeywordOpportunity[] = keywordRows.map((row) => {
+    const scoreStatus: ScoreStatus = row.scoreStatus === "discovery"
+      ? "discovery"
+      : row.scoreStatus === "provisional" || row.scoreStatus === "scored"
+        ? row.scoreStatus
+        : "insufficient_data";
+    const level = keywordLevel(row.opportunityScore);
+    const isSeed = row.normalizedKeyword === seed;
+    return {
+      keyword: row.displayKeyword,
+      normalizedKeyword: row.normalizedKeyword,
+      source: row.source,
+      isSeed,
+      researchStatus: isSeed ? "directly_researched" : "discovered",
+      scoreStatus,
+      rank: null,
+      score: row.opportunityScore,
+      opportunityScore: row.opportunityScore,
+      level: row.rankLevel as KeywordLevel,
+      label: scoreStatus === "discovery" ? "Discovery evidence" : level.label,
+      indicator: level.indicator,
+      confidence: "medium",
+      autocompletePosition: row.autocompletePosition,
+      suggestionFrequency: row.suggestionFrequency,
+      queryCount: row.queryCount,
+      assetCount: row.assetCount,
+      supportingAssetCount: row.assetCount,
+      enrichedSampleCount: 0,
+      bestDownloadRank: row.bestDownloadRank,
+      averageDownloadRank: row.averageDownloadRank,
+      bestRecentRank: row.bestRecentRank,
+      bestRelevanceRank: null,
+      resultCount: row.resultCount,
+      resultCountQualifier: "unknown",
+      downloadSignalScore: row.demandScore,
+      lowCompetitionScore: row.competitionScore,
+      relevanceSignalScore: null,
+      freshnessSignalScore: row.freshnessScore,
+      crossSortScore: row.consistencyScore,
+      autocompleteScore: null,
+      evidenceQueries: [],
+      firstObservedAt: row.observedAt,
+      lastObservedAt: row.observedAt
+    };
+  });
+  keywordOpportunities.sort((a, b) => a.isSeed !== b.isSeed
+    ? (a.isSeed ? -1 : 1)
+    : (b.opportunityScore ?? -1) - (a.opportunityScore ?? -1));
+  let rank = 0;
+  for (const item of keywordOpportunities) if (!item.isSeed && item.score !== null) item.rank = ++rank;
+
+  const assetOpportunities: AssetOpportunity[] = assetRows.map(({ snapshot, asset }) => {
+    const ranks = { downloads: snapshot.bestDownloadRank, relevance: snapshot.bestRelevanceRank, recent: snapshot.bestRecentRank };
+    const foundModes = (Object.entries(ranks) as Array<[SortMode, number | null]>).filter(([, value]) => value !== null).map(([mode]) => mode);
+    const coverage = foundModes.length;
+    const crossSortLabel: AssetOpportunity["crossSortLabel"] = coverage === 3
+      ? "strong_consensus"
+      : coverage === 2 ? "multi_signal"
+        : coverage === 1 ? "single_signal" : "partial_evidence";
+    const evidence: string[] = [];
+    if (snapshot.bestDownloadRank !== null && snapshot.bestDownloadRank <= 10) evidence.push("top_download_signal");
+    if (snapshot.bestRecentRank !== null && snapshot.bestRecentRank <= 10) evidence.push("fresh_contender");
+    if (crossSortLabel !== "partial_evidence") evidence.push(crossSortLabel);
+    const sortStatus = {
+      downloads: snapshot.bestDownloadRank === null ? "not_observed_in_sample" : "found",
+      relevance: snapshot.bestRelevanceRank === null ? "not_observed_in_sample" : "found",
+      recent: snapshot.bestRecentRank === null ? "not_observed_in_sample" : "found"
+    } as AssetOpportunity["sortStatus"];
+    return {
+      assetId: asset.id,
+      externalId: asset.externalId,
+      title: asset.title,
+      assetUrl: asset.assetUrl,
+      thumbnailUrl: asset.thumbnailUrl,
+      assetType: asset.assetType,
+      width: asset.width,
+      height: asset.height,
+      isPremium: asset.isPremium,
+      query: run.seedKeyword,
+      appearances: snapshot.appearances,
+      sortModes: foundModes,
+      sortCoverage: coverage,
+      evaluatedSortCount: 3,
+      crossSortLabel,
+      sortStatus,
+      evidence,
+      ranks,
+      bestDownloadRank: snapshot.bestDownloadRank,
+      bestRecentRank: snapshot.bestRecentRank,
+      bestRelevanceRank: snapshot.bestRelevanceRank,
+      keywordCount: snapshot.keywordCount,
+      assetScore: snapshot.assetScore,
+      scoreStatus: snapshot.scoreStatus === "scored" ? "scored" as const : "insufficient_data" as const,
+      firstObservedAt: snapshot.observedAt,
+      lastObservedAt: snapshot.observedAt
+    };
+  }).sort((a, b) => (b.assetScore ?? -1) - (a.assetScore ?? -1));
+
+  const dates = [...keywordRows.map((row) => row.observedAt), ...assetRows.map(({ snapshot }) => snapshot.observedAt)];
+  const age = dataAgeStatus(minDate(dates));
+  const scoredKeywords = keywordOpportunities.filter((item) => item.score !== null && !item.isSeed);
+  const expectedQueries = run.progressTotal || 0;
+  const complete = run.status === "completed";
+  const warnings = ["Data mentah sudah dibersihkan; tampilan ini memakai snapshot scoring."];
+  return {
+    runId: run.id,
+    scoringVersion: SCORING_VERSION,
+    generatedAt: new Date().toISOString(),
+    dataAge: { firstObservedAt: minDate(dates), lastObservedAt: maxDate(dates), dataAgeDays: age.ageDays, status: age.status, refreshRecommended: age.refreshRecommended },
+    totals: { suggestions: keywordRows.length, queries: complete ? expectedQueries : 0, expectedQueries, uniqueAssets: new Set(assetRows.map(({ snapshot }) => snapshot.assetId)).size, keywords: keywordRows.length, scoredKeywords: scoredKeywords.length },
+    dataQuality: { queryCoveragePct: complete ? 100 : 0, keywordCoveragePct: 100, completenessScore: complete ? 100 : 50, confidence: complete ? "medium" : "low", warnings, downloadsAssets: assetRows.length, assetsWithKeywords: assetRows.filter(({ snapshot }) => snapshot.keywordCount > 0).length, missingKeywordAssets: assetRows.filter(({ snapshot }) => snapshot.keywordCount === 0).length, resultCountsAvailable: 0 },
+    scores: { demandScore: averageNullable(scoredKeywords.map((item) => item.downloadSignalScore)), competitionScore: averageNullable(scoredKeywords.map((item) => item.lowCompetitionScore)), freshnessScore: averageNullable(scoredKeywords.map((item) => item.freshnessSignalScore)), consistencyScore: averageNullable(scoredKeywords.map((item) => item.crossSortScore)), opportunityScore: averageNullable(scoredKeywords.map((item) => item.score)) },
+    topKeywords: keywordOpportunities.slice(0, Math.min(Math.max(limit, 1), 500)),
+    topAssets: assetOpportunities.slice(0, Math.min(Math.max(limit, 1), 500))
+  } satisfies ResearchSummary;
+}
+
 export async function getKeywordOpportunities(runId: string, limit = 50) { return (await getResearchInsights(runId, limit))?.topKeywords ?? null; }
 export async function getTopAssets(runId: string, limit = 50) { return (await getResearchInsights(runId, limit))?.topAssets ?? null; }
 export async function getAiContext(runId: string) {
   const insights = await getResearchInsights(runId, 20);
   if (!insights) return null;
   const run = await getResearchRun(runId);
-  return { schemaVersion: "2.0", scoringVersion: insights.scoringVersion, run: { id: insights.runId, seedKeyword: run?.seedKeyword, assetType: run?.assetType, locale: run?.locale }, dataAge: insights.dataAge, dataQuality: insights.dataQuality, scores: insights.scores, topKeywords: insights.topKeywords, topAssets: insights.topAssets, instructions: "Gunakan data sebagai sinyal observasi. Jangan mengklaim jumlah download, upload date, atau jaminan penjualan. Keyword tanpa pencarian langsung belum memiliki score pasar." };
+  return { schemaVersion: "2.0", scoringVersion: insights.scoringVersion, run: { id: insights.runId, seedKeyword: run?.seedKeyword, assetType: run?.assetType, locale: run?.locale }, dataAge: insights.dataAge, dataQuality: insights.dataQuality, scores: insights.scores, topKeywords: insights.topKeywords, topAssets: insights.topAssets, instructions: "Gunakan data sebagai sinyal observasi. Jangan mengklaim jumlah download, upload date, atau jaminan penjualan. Keyword tanpa pencarian langsung memiliki discovery score, bukan market score." };
 }
