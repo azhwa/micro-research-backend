@@ -316,7 +316,14 @@ function classifyFailure(error: unknown, diagnostics?: PageDiagnostics): Failure
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error)) return String(error);
+
+  const cause = error.cause;
+  if (cause instanceof Error && cause !== error) {
+    return `${error.message}; cause: ${cause.message}`;
+  }
+
+  return error.message;
 }
 
 function stringValue(value: unknown): string | null {
