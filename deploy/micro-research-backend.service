@@ -1,0 +1,23 @@
+[Unit]
+Description=Micro Research Backend (PM2 runtime)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ubuntu/micro-research-backend
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=3315
+Environment=DISPLAY=:99
+Environment=PLAYWRIGHT_HEADLESS=false
+ExecStart=/usr/bin/pm2-runtime /home/ubuntu/micro-research-backend/ecosystem.config.js --env production
+Restart=always
+RestartSec=5
+KillMode=mixed
+CPUAccounting=true
+CPUQuota=190%
+
+[Install]
+WantedBy=multi-user.target
