@@ -1534,6 +1534,24 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             }
           );
 
+          if (sortMode === "downloads") {
+            const attempted = await enrichDownloadAssets(searchResult.assets);
+            if (attempted > 0) {
+              await appendResearchEvent(
+                researchRunId,
+                "info",
+                "keyword_enrichment_progress",
+                `Keyword detail diproses untuk ${attempted} asset Downloads`,
+                {
+                  attempted,
+                  success: keywordSuccess,
+                  empty: keywordEmpty,
+                  failed: keywordFailed
+                }
+              );
+            }
+          }
+
           await randomJitter(700, 1800);
         }
       }
