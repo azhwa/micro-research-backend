@@ -1353,17 +1353,23 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         const context = browser.contexts()[0] || (await browser.newContext({
           viewport: { width: 1920, height: 1080 }
         }));
-        const page = await context.newPage();
-        try {
-          await executeScrapingSession(page);
-          if (!requestHandled || !requestSucceeded) {
-            throw new Error("Crawler gagal menyelesaikan request Adobe Stock via CDP");
-          }
-          if (selectedProxy) await markProxySuccess(selectedProxy.id);
-        } finally {
-          await page.close().catch(() => {});
-          await browser.close().catch(() => {});
+        // Reuse the browser's existing tab so Adobe's challenge cookies and
+        // browser session remain available for the next research run. The
+        // external Chromium process is owned by systemd, not this request.
+        const page = context.pages().find((candidate) => !candidate.isClosed())
+          ?? await context.newPage();
+        await executeScrapingSession(page);
+        if (!requestHandled || !requestSucceeded) {
+          throw new Error("Crawler gagal menyelesaikan request Adobe Stock via CDP");
         }
+        if (selectedProxy) await markProxySuccess(selectedProxy.id);
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "crawler_cdp_session_kept_open",
+          "Browser CDP eksternal tetap terbuka agar session challenge Adobe dapat dipakai ulang",
+          { cdpUrl: env.playwrightCdpUrl, openPages: context.pages().length }
+        );
       } catch (error) {
         if (selectedProxy) {
           await markProxyFailure(
