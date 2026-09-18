@@ -746,6 +746,7 @@ async function collectSearchResults(
   // own dropdown. Sending `order=...` directly is unreliable with Adobe's
   // bot protection and does not always match the UI state.
   const isPageOne = query.trim() === "";
+  const sortValue = adobeSortValue(sortMode);
   let { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
     page,
     assetType,
@@ -758,7 +759,8 @@ async function collectSearchResults(
   // reload the current clean result page before changing from one sort to the
   // next. Without this reset Adobe can leave the native select disabled at
   // the previous `order` value (usually relevance).
-  if (isPageOne && new URL(page.url()).searchParams.has("order")) {
+  const currentSort = new URL(page.url()).searchParams.get("order");
+  if (isPageOne && currentSort && currentSort !== sortValue) {
     const response = await page.reload({
       waitUntil: "domcontentloaded",
       timeout: navigationTimeout
@@ -790,7 +792,6 @@ async function collectSearchResults(
   }
 
   const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
-  const sortValue = adobeSortValue(sortMode);
   const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
   try {
     await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
