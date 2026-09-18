@@ -342,7 +342,17 @@ async function selectAdobeSort(
 
       if (!state.disabled && state.optionExists) {
         await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
-        if (await select.inputValue() === sortValue) return;
+        await page.waitForFunction(
+          ({ selector, value }) => {
+            const element = document.querySelector(selector);
+            return element instanceof HTMLSelectElement
+              && element.value === value
+              && !element.disabled;
+          },
+          { selector: SORT_SELECT_SELECTOR, value: sortValue },
+          { timeout: Math.min(remaining, 10_000) }
+        );
+        return;
       }
 
       lastError = new Error(`Adobe tidak mempertahankan sort '${sortValue}'`);
@@ -362,27 +372,36 @@ async function waitForAdobeResults(
   page: Page,
   query: string,
   sortValue: string,
-  timeoutMs: number
+  timeoutMs: number,
+  requireEnabled: boolean
 ): Promise<boolean> {
   return page
     .waitForFunction(
-      ({ requestedQuery, expectedSort, resultSelector, sortSelector }) => {
+      ({ requestedQuery, expectedSort, resultSelector, sortSelector, requireEnabled }) => {
         const url = new URL(location.href);
         const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
         const queryMatches = currentQuery === requestedQuery.trim().toLowerCase();
         const select = document.querySelector(sortSelector);
         const selectedValue = select instanceof HTMLSelectElement ? select.value : null;
         const sortMatches = url.searchParams.get("order") === expectedSort || selectedValue === expectedSort;
+        const sortControlReady = !requireEnabled
+          || !(select instanceof HTMLSelectElement)
+          || !select.disabled;
         const body = document.body?.innerText || "";
         const noResults = /no results|0 results|didn't find any/i.test(body);
         const resultCount = document.querySelectorAll(resultSelector).length;
 
-        return queryMatches && sortMatches && (resultCount > 0 || noResults);
+        return queryMatches && sortMatches && sortControlReady && (resultCount > 0 || noResults);
       },
-      { requestedQuery: query, expectedSort: sortValue, resultSelector: ADOBE_RESULT_SELECTOR, sortSelector: SORT_SELECT_SELECTOR },
+      { requestedQuery: query, expectedSort: sortValue, resultSelector: ADOBE_RESULT_SELECTOR, sortSelector: SORT_SELECT_SELECTOR, requireEnabled },
       { timeout: timeoutMs }
     )
-    .then(() => true)
+    .then(async () => {
+      // Adobe replaces the result cards after the control becomes enabled.
+      // Give the SPA one short paint cycle before extraction begins.
+      await page.waitForTimeout(750);
+      return true;
+    })
     .catch(() => false);
 }
 
@@ -751,9 +770,25 @@ async function collectSearchResults(
   const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
   try {
     await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
+    const initialSortState = await page.evaluate(({ selector, value, requestedQuery }) => {
+      const element = document.querySelector(selector);
+      const url = new URL(location.href);
+      return {
+        alreadyApplied: element instanceof HTMLSelectElement
+          && element.value === value
+          && url.searchParams.get("order") === value
+          && (url.searchParams.get("k") || "").trim().toLowerCase() === requestedQuery.trim().toLowerCase()
+      };
+    }, { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query });
     await selectAdobeSort(page, sortValue, Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS), query);
     await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-    const resultReady = await waitForAdobeResults(page, query, sortValue, resultSelectorTimeout);
+    const resultReady = await waitForAdobeResults(
+      page,
+      query,
+      sortValue,
+      resultSelectorTimeout,
+      !initialSortState.alreadyApplied
+    );
     if (!resultReady) {
       throw new Error(`Hasil Adobe belum siap setelah sort '${sortValue}'`);
     }
