@@ -51,7 +51,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       const maxSuggestions = positiveInteger(body.maxSuggestions, 30);
       const assetsPerQuery = positiveInteger(body.assetsPerQuery, 30);
       const autocompleteEnabled = body.autocompleteEnabled !== false;
-      const mode: ResearchMode = body.mode === "fast" ? "fast" : "full";
+      const mode: ResearchMode = body.mode === "fast" ? "fast" : body.mode === "primary" ? "primary" : "full";
 
       if (!keyword || keyword.length > 120) {
         return reply.status(400).send({

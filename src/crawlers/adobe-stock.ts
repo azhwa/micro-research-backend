@@ -38,6 +38,7 @@ interface CollectedAsset {
 }
 
 const SORT_MODES: SortMode[] = ["downloads", "relevance", "recent"];
+const PRIMARY_SORT_MODES: SortMode[] = ["relevance", "recent", "downloads"];
 const FAST_SORT_MODES: SortMode[] = ["downloads"];
 const BATCH_SIZE = 25;
 
@@ -827,13 +828,20 @@ async function collectSearchResults(
     }
   }
 
-  await page.evaluate(async () => {
-    const steps = 3;
-    for (let i = 0; i < steps; i++) {
-      window.scrollBy({ top: 300 + Math.random() * 180, behavior: "smooth" });
-      await new Promise((r) => setTimeout(r, 140 + Math.random() * 90));
+  await page.evaluate(async (maxAssets) => {
+    let previousCount = 0;
+    let stableRounds = 0;
+    for (let step = 0; step < 24 && stableRounds < 3; step += 1) {
+      const currentCount = document.querySelectorAll("[data-content-id]").length;
+      if (currentCount >= maxAssets) break;
+      window.scrollBy({ top: 420 + Math.random() * 180, behavior: "smooth" });
+      await new Promise((resolve) => setTimeout(resolve, 260 + Math.random() * 140));
+      const nextCount = document.querySelectorAll("[data-content-id]").length;
+      stableRounds = nextCount === previousCount ? stableRounds + 1 : 0;
+      previousCount = nextCount;
     }
-  });
+    window.scrollTo(0, 0);
+  }, limit);
   await randomJitter(400, 800);
 
   const result = await page.evaluate((maxAssets) => {
@@ -1275,12 +1283,12 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   const run = await getResearchRun(researchRunId);
   if (!run) throw new Error("Research run tidak ditemukan");
 
-  const mode: ResearchMode = run.mode === "fast" ? "fast" : "full";
-  const sortModes = mode === "fast" ? FAST_SORT_MODES : SORT_MODES;
+  const mode: ResearchMode = run.mode === "fast" ? "fast" : run.mode === "primary" ? "primary" : "full";
+  const sortModes = mode === "fast" ? FAST_SORT_MODES : mode === "primary" ? PRIMARY_SORT_MODES : SORT_MODES;
   const autocompletePrefixLimit = mode === "fast" ? 5 : 27;
   const navigationTimeout = mode === "fast" ? 20_000 : 30_000;
   const selectorTimeout = mode === "fast" ? 8_000 : 15_000;
-  const keywordDetailLimit = mode === "fast" ? 1 : Number.POSITIVE_INFINITY;
+  const keywordDetailLimit = mode === "fast" ? 1 : mode === "primary" ? 50 : Number.POSITIVE_INFINITY;
 
   let requestHandled = false;
   let requestSucceeded = false;
@@ -1337,7 +1345,19 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         }
       );
       let suggestionResult: Awaited<ReturnType<typeof collectSuggestions>>;
-      if (run.autocompleteEnabled) {
+      if (mode === "primary") {
+        suggestionResult = {
+          rows: [{ baseKeyword: run.seedKeyword, suggestion: run.seedKeyword, position: 1, prefix: null }],
+          source: "seed_fallback"
+        };
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "primary_page_one_started",
+          `Primary Page-One Snapshot dimulai untuk seed “${run.seedKeyword}”`,
+          { seedKeyword: run.seedKeyword, sortModes, assetsPerSort: run.assetsPerQuery }
+        );
+      } else if (run.autocompleteEnabled) {
         // Autocomplete must start from the clean Adobe search page. The
         // extension does not open a query URL first; it types into this page
         // and reads the resulting DOM panel.

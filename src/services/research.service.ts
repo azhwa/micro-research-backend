@@ -17,7 +17,7 @@ import { getDatabase } from "../db/client";
 import type { AuthContext } from "../auth";
 
 export type AssetType = "images" | "videos";
-export type ResearchMode = "fast" | "full";
+export type ResearchMode = "fast" | "full" | "primary";
 
 export interface CreateResearchInput {
   keyword: string;
