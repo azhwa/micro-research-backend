@@ -191,7 +191,9 @@ function buildKeywordOpportunities(seedKeyword: string, suggestionsRows: Suggest
       evidenceQueries: [...new Set(supportingObservations.map((row) => row.query))], firstObservedAt: minDate(evidenceDates), lastObservedAt: maxDate(evidenceDates)
     };
   });
-  all.sort((a, b) => a.isSeed !== b.isSeed ? (a.isSeed ? 1 : -1) : (a.score !== null || b.score !== null) ? (b.score ?? -1) - (a.score ?? -1) : b.supportingAssetCount - a.supportingAssetCount || (a.autocompletePosition ?? 999) - (b.autocompletePosition ?? 999));
+  // Keep the researched seed visible before the much larger related-tag set.
+  // Otherwise hundreds of discovered tags can push the seed past the API/UI limit.
+  all.sort((a, b) => a.isSeed !== b.isSeed ? (a.isSeed ? -1 : 1) : (a.score !== null || b.score !== null) ? (b.score ?? -1) - (a.score ?? -1) : b.supportingAssetCount - a.supportingAssetCount || (a.autocompletePosition ?? 999) - (b.autocompletePosition ?? 999));
   let rank = 0;
   for (const item of all) if (!item.isSeed && item.score !== null) item.rank = ++rank;
   return all;
