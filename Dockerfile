@@ -8,7 +8,10 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 
-RUN npm ci \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm ci \
     && npx playwright install --with-deps chromium
 
 FROM dependencies AS builder
@@ -32,7 +35,10 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 
-RUN npm ci --omit=dev \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm ci --omit=dev \
     && mkdir -p /app/storage \
     && chown -R node:node /app
 
