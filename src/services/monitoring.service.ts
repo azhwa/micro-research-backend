@@ -1,6 +1,7 @@
 import { desc } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { researchEvents, researchJobs, researchRuns } from "../db/schema";
+import { env } from "../config/env";
 
 export async function getMonitoringSnapshot() {
   const database = getDatabase();
@@ -35,7 +36,7 @@ export async function getMonitoringSnapshot() {
   return {
     generatedAt: new Date().toISOString(),
     worker: {
-      concurrency: 1,
+      concurrency: env.workerConcurrency,
       activeJobs: runningJobs.length,
       lastHeartbeatAt: heartbeats.length ? new Date(Math.max(...heartbeats.map((date) => date.getTime()))).toISOString() : null,
       staleThresholdMinutes: 20,

@@ -46,13 +46,13 @@ export async function authenticateRequest(request: FastifyRequest): Promise<Auth
       authorizedParties: env.clerkAuthorizedParties.length ? env.clerkAuthorizedParties : undefined
     });
     const organizationRole = typeof payload.org_role === "string" ? payload.org_role : null;
-    const isAdminByUserId = env.clerkAdminUserIds.includes(payload.sub);
     return {
       userId: payload.sub,
       sessionId: typeof payload.sid === "string" ? payload.sid : null,
       organizationId: typeof payload.org_id === "string" ? payload.org_id : null,
       organizationRole,
-      isAdmin: isAdminByUserId,
+      // This MVP has no member/role model: every authenticated user is an admin.
+      isAdmin: true,
       isDevBypass: false
     };
   } catch {

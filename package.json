@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:scoring": "tsx src/services/insights.scoring.test.ts",
+    "test:stealth": "tsx src/crawlers/stealth.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },

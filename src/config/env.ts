@@ -12,16 +12,15 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-function parseCsv(value: string | undefined): string[] {
-  return (value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number, max = 10): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
 }
 
 export const env = {
@@ -29,13 +28,14 @@ export const env = {
   port: parsePort(process.env.PORT),
   host: process.env.HOST ?? "127.0.0.1",
   playwrightHeadless: parseBoolean(process.env.PLAYWRIGHT_HEADLESS, true),
+  playwrightCdpUrl: process.env.PLAYWRIGHT_CDP_URL?.trim() ?? "",
+  workerConcurrency: parsePositiveInteger(process.env.WORKER_CONCURRENCY, 1, 10),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
   tursoDatabaseUrl: process.env.TURSO_DATABASE_URL ?? "",
   tursoAuthToken: process.env.TURSO_AUTH_TOKEN ?? "",
   clerkSecretKey: process.env.CLERK_SECRET_KEY ?? "",
   clerkJwtKey: (process.env.CLERK_JWT_KEY ?? "").replace(/\\n/g, "\n"),
   clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY ?? "",
-  clerkAdminUserIds: parseCsv(process.env.CLERK_ADMIN_USER_IDS),
   clerkAuthorizedParties: (process.env.CLERK_AUTHORIZED_PARTIES ?? process.env.FRONTEND_ORIGIN ?? "")
     .split(",").map((value) => value.trim()).filter(Boolean),
   clerkAudience: process.env.CLERK_JWT_AUDIENCE ?? "",

@@ -1,5 +1,5 @@
 import { PlaywrightCrawler } from "crawlee";
-import type { Page } from "playwright";
+import { chromium, type Page } from "playwright";
 import { and, eq, sql } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import {
@@ -39,6 +39,148 @@ interface CollectedAsset {
 const SORT_MODES: SortMode[] = ["downloads", "relevance", "recent"];
 const FAST_SORT_MODES: SortMode[] = ["downloads"];
 const BATCH_SIZE = 25;
+
+export function randomJitter(minMs: number, maxMs: number): Promise<void> {
+  const ms = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const STEALTH_INIT_SCRIPT = `
+(() => {
+  try {
+    const nav = navigator;
+    const navProto = Object.getPrototypeOf(navigator);
+    if ("webdriver" in navProto) {
+      delete navProto.webdriver;
+    }
+    if ("webdriver" in navigator) {
+      try {
+        delete navigator.webdriver;
+      } catch (e) {}
+    }
+
+    const win = window;
+    if (!win.chrome) {
+      Object.defineProperty(win, "chrome", {
+        writable: true,
+        enumerable: true,
+        configurable: false,
+        value: {}
+      });
+    }
+
+    if (!win.chrome.app) {
+      Object.defineProperty(win.chrome, "app", {
+        writable: true,
+        enumerable: true,
+        configurable: true,
+        value: {
+          isInstalled: false,
+          InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
+          RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" }
+        }
+      });
+    }
+
+    if (!win.chrome.runtime) {
+      Object.defineProperty(win.chrome, "runtime", {
+        writable: true,
+        enumerable: true,
+        configurable: true,
+        value: {
+          OnInstalledReason: {},
+          OnRestartRequiredReason: {},
+          PlatformArch: { ARM: "arm", ARM64: "arm64", MIPS: "mips", MIPS64: "mips64", X86_32: "x86-32", X86_64: "x86-64" },
+          PlatformNaclArch: { ARM: "arm", MIPS: "mips", MIPS64: "mips64", X86_32: "x86-32", X86_64: "x86-64" },
+          PlatformOs: { ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win" },
+          RequestUpdateCheckStatus: { NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available" }
+        }
+      });
+    }
+
+    if (!win.chrome.loadTimes) {
+      Object.defineProperty(win.chrome, "loadTimes", {
+        writable: true,
+        enumerable: true,
+        configurable: true,
+        value: function () {
+          return {
+            commitLoadTime: Date.now() / 1000 - 0.5,
+            connectionInfo: "h2",
+            finishDocumentLoadTime: Date.now() / 1000 - 0.2,
+            finishLoadTime: Date.now() / 1000 - 0.1,
+            firstPaintAfterLoadTime: 0,
+            firstPaintTime: Date.now() / 1000 - 0.3,
+            navigationType: "Other",
+            npnNegotiatedProtocol: "h2",
+            requestTime: Date.now() / 1000 - 0.8,
+            startLoadTime: Date.now() / 1000 - 0.8,
+            wasAlternateProtocolAvailable: false,
+            wasFetchedViaSpdy: true,
+            wasNpnNegotiated: true
+          };
+        }
+      });
+    }
+
+    if (!win.chrome.csi) {
+      Object.defineProperty(win.chrome, "csi", {
+        writable: true,
+        enumerable: true,
+        configurable: true,
+        value: function () {
+          return {
+            startE: Date.now() - 800,
+            onloadT: Date.now() - 200,
+            pageT: 600,
+            tran: 15
+          };
+        }
+      });
+    }
+
+    if (!nav.plugins || nav.plugins.length === 0) {
+      const dummyPlugin = {
+        0: { type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format" },
+        description: "Portable Document Format",
+        filename: "internal-pdf-viewer",
+        length: 1,
+        name: "Chrome PDF Plugin"
+      };
+      Object.defineProperty(nav, "plugins", {
+        get: () => [dummyPlugin, dummyPlugin],
+        configurable: true
+      });
+    }
+
+    Object.defineProperty(nav, "languages", {
+      get: () => ["en-US", "en"],
+      configurable: true
+    });
+
+    if (nav.permissions && nav.permissions.query) {
+      const originalQuery = nav.permissions.query.bind(nav.permissions);
+      nav.permissions.query = (parameters) =>
+        parameters && parameters.name === "notifications"
+          ? Promise.resolve({ state: (win.Notification && win.Notification.permission) || "default" })
+          : originalQuery(parameters);
+    }
+
+    if (typeof WebGLRenderingContext !== "undefined") {
+      const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) return "Google Inc. (NVIDIA)";
+        if (parameter === 37446) return "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        return originalGetParameter.apply(this, [parameter]);
+      };
+    }
+  } catch {}
+})();
+`;
+
+export async function applyStealthScripts(page: Page): Promise<void> {
+  await page.addInitScript(STEALTH_INIT_SCRIPT);
+}
 
 function chunks<T>(rows: T[], size = BATCH_SIZE): T[][] {
   const result: T[][] = [];
@@ -177,6 +319,85 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+interface ScrapingLocation {
+  ip: string | null;
+  country: string | null;
+  countryCode: string | null;
+  region: string | null;
+  city: string | null;
+  isp: string | null;
+  organization: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  httpStatus: number | null;
+  lookupError?: string;
+}
+
+/**
+ * Resolve the public egress IP from inside the Playwright context. A
+ * Node-side request could bypass the browser proxy and report the VPS IP.
+ */
+async function collectScrapingLocation(page: Page): Promise<ScrapingLocation> {
+  let probe: Page | null = null;
+  let httpStatus: number | null = null;
+
+  try {
+    probe = await page.context().newPage();
+    const response = await probe.goto("https://ipwho.is/", {
+      waitUntil: "domcontentloaded",
+      timeout: 10_000
+    });
+    httpStatus = response?.status() ?? null;
+    const body = await probe.locator("body").innerText({ timeout: 3_000 });
+    const payload = JSON.parse(body) as Record<string, unknown>;
+
+    if (payload.success === false) {
+      throw new Error(stringValue(payload.message) ?? "IP geolocation lookup failed");
+    }
+
+    const connection = payload.connection && typeof payload.connection === "object"
+      ? payload.connection as Record<string, unknown>
+      : {};
+
+    return {
+      ip: stringValue(payload.ip),
+      country: stringValue(payload.country),
+      countryCode: stringValue(payload.country_code),
+      region: stringValue(payload.region),
+      city: stringValue(payload.city),
+      isp: stringValue(connection.isp),
+      organization: stringValue(connection.org),
+      latitude: numberValue(payload.latitude),
+      longitude: numberValue(payload.longitude),
+      httpStatus
+    };
+  } catch (error) {
+    return {
+      ip: null,
+      country: null,
+      countryCode: null,
+      region: null,
+      city: null,
+      isp: null,
+      organization: null,
+      latitude: null,
+      longitude: null,
+      httpStatus,
+      lookupError: errorMessage(error)
+    };
+  } finally {
+    await probe?.close().catch(() => undefined);
+  }
+}
+
 function diagnosticMetadata(
   error: unknown,
   diagnostics?: PageDiagnostics,
@@ -260,6 +481,7 @@ async function collectSuggestions(
 
   for (const [index, prefix] of source === "adobe_autocomplete" ? prefixes.entries() : []) {
     try {
+      await randomJitter(350, 750);
       // The extension types into the existing Adobe input and emits input
       // events. Use the same value mutation and input dispatch as the
       // extension; keyboard events can be ignored by Adobe's search handler.
@@ -272,7 +494,8 @@ async function collectSuggestions(
         for (const character of value) {
           element.value += character;
           element.dispatchEvent(new Event("input", { bubbles: true }));
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          const typingDelay = Math.floor(Math.random() * (130 - 60 + 1)) + 60;
+          await new Promise((resolve) => setTimeout(resolve, typingDelay));
         }
       }, { selector: AUTOCOMPLETE_INPUT_SELECTOR, value: prefix });
 
@@ -393,7 +616,14 @@ async function collectSearchResults(
     }
   }
 
-  await page.waitForTimeout(800);
+  await page.evaluate(async () => {
+    const steps = 3;
+    for (let i = 0; i < steps; i++) {
+      window.scrollBy({ top: 300 + Math.random() * 180, behavior: "smooth" });
+      await new Promise((r) => setTimeout(r, 140 + Math.random() * 90));
+    }
+  });
+  await randomJitter(400, 800);
 
   const result = await page.evaluate((maxAssets) => {
     const body = document.body?.innerText ?? "";
@@ -808,33 +1038,33 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     { headless: env.playwrightHeadless, display: process.env.DISPLAY ?? null }
   );
 
-  const crawler = new PlaywrightCrawler({
-    maxConcurrency: 1,
-    maxRequestsPerCrawl: 1,
-    useSessionPool: false,
-    requestHandlerTimeoutSecs: 900,
-    launchContext: {
-      launchOptions: {
-        headless: env.playwrightHeadless,
-        args: ["--disable-dev-shm-usage", "--disable-gpu"],
-        ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
-      }
-    },
-    failedRequestHandler: async ({ request, error }) => {
-      const failureType = classifyFailure(error);
+  const executeScrapingSession = async (page: Page) => {
+    await applyStealthScripts(page);
+    requestHandled = true;
+      const scrapingLocation = await collectScrapingLocation(page);
+      const locationLabel = [
+        scrapingLocation.city,
+        scrapingLocation.region,
+        scrapingLocation.country
+      ].filter(Boolean).join(", ");
+      const connectionLabel = selectedProxy
+        ? `proxy ${selectedProxy.displayUrl}`
+        : "koneksi langsung VPS";
       await appendResearchEvent(
         researchRunId,
-        "error",
-        "crawler_request_failed",
-        `Request crawler gagal [${failureType}]: ${request.url}`,
+        scrapingLocation.ip ? "info" : "warning",
+        "scraping_location",
+        scrapingLocation.ip
+          ? `Scraping memakai ${connectionLabel} · IP ${scrapingLocation.ip}${locationLabel ? ` · ${locationLabel}` : ""}`
+          : `Lokasi scraping tidak dapat diverifikasi melalui ${connectionLabel}`,
         {
-          requestUrl: request.url,
-          ...diagnosticMetadata(error, undefined, failureType)
+          connection: selectedProxy ? "proxy" : "direct",
+          proxyId: selectedProxy?.id ?? null,
+          proxy: selectedProxy?.displayUrl ?? null,
+          lookupUrl: "https://ipwho.is/",
+          ...scrapingLocation
         }
       );
-    },
-    requestHandler: async ({ page }) => {
-      requestHandled = true;
       let suggestionResult: Awaited<ReturnType<typeof collectSuggestions>>;
       if (run.autocompleteEnabled) {
         // Autocomplete must start from the clean Adobe search page. The
@@ -1020,49 +1250,111 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             }
           );
 
-          if (sortMode === "downloads") {
-            const attempted = await enrichDownloadAssets(searchResult.assets);
-            await appendResearchEvent(
-              researchRunId,
-              "info",
-              "keyword_enrichment_finished",
-              `Selesai mencoba keyword detail dari ${searchResult.assets.length} asset Downloads`,
-              {
-                attempted,
-                limit: Number.isFinite(keywordDetailLimit) ? keywordDetailLimit : null,
-                success: keywordSuccess,
-                empty: keywordEmpty,
-                failed: keywordFailed
-              }
-            );
-          }
-
+          await randomJitter(700, 1800);
         }
       }
       requestSucceeded = true;
-    }
-  });
+    };
 
-  const startUrl = searchUrl(run.seedKeyword, run.assetType, undefined, run.locale);
-  try {
-  await crawler.run([
-    {
-      url: startUrl,
-      uniqueKey: `${startUrl}#${researchRunId}`
-    }
-  ]);
-
-  if (!requestHandled || !requestSucceeded) {
-    throw new Error("Crawler gagal menyelesaikan request Adobe Stock");
-  }
-    if (selectedProxy) await markProxySuccess(selectedProxy.id);
-  } catch (error) {
-    if (selectedProxy) {
-      await markProxyFailure(
-        selectedProxy.id,
-        error instanceof Error ? error.message : "Crawler gagal melalui proxy",
+    if (env.playwrightCdpUrl) {
+      await appendResearchEvent(
+        researchRunId,
+        "info",
+        "crawler_browser_mode",
+        `Browser crawler: external CDP (${env.playwrightCdpUrl})`,
+        { cdpUrl: env.playwrightCdpUrl }
       );
+      try {
+        const browser = await chromium.connectOverCDP(env.playwrightCdpUrl);
+        const context = browser.contexts()[0] || (await browser.newContext({
+          viewport: { width: 1920, height: 1080 }
+        }));
+        const page = await context.newPage();
+        try {
+          await executeScrapingSession(page);
+          if (!requestHandled || !requestSucceeded) {
+            throw new Error("Crawler gagal menyelesaikan request Adobe Stock via CDP");
+          }
+          if (selectedProxy) await markProxySuccess(selectedProxy.id);
+        } finally {
+          await page.close().catch(() => {});
+          await browser.close().catch(() => {});
+        }
+      } catch (error) {
+        if (selectedProxy) {
+          await markProxyFailure(
+            selectedProxy.id,
+            error instanceof Error ? error.message : "Crawler gagal melalui proxy (CDP)"
+          );
+        }
+        throw error;
+      }
+      return;
     }
-    throw error;
-  }
+
+    const crawler = new PlaywrightCrawler({
+      maxConcurrency: 1,
+      maxRequestsPerCrawl: 1,
+      useSessionPool: false,
+      requestHandlerTimeoutSecs: 900,
+      launchContext: {
+        launchOptions: {
+          headless: env.playwrightHeadless,
+          args: [
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1920,1080"
+          ],
+          ignoreDefaultArgs: ["--enable-automation"],
+          ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
+        }
+      },
+      preNavigationHooks: [
+        async ({ page }) => {
+          await applyStealthScripts(page);
+        }
+      ],
+      failedRequestHandler: async ({ request, error }) => {
+        const failureType = classifyFailure(error);
+        await appendResearchEvent(
+          researchRunId,
+          "error",
+          "crawler_request_failed",
+          `Request crawler gagal [${failureType}]: ${request.url}`,
+          {
+            requestUrl: request.url,
+            ...diagnosticMetadata(error, undefined, failureType)
+          }
+        );
+      },
+      requestHandler: async ({ page }) => {
+        await executeScrapingSession(page);
+      }
+    });
+
+    const startUrl = searchUrl(run.seedKeyword, run.assetType, undefined, run.locale);
+    try {
+      await crawler.run([
+        {
+          url: startUrl,
+          uniqueKey: `${startUrl}#${researchRunId}`
+        }
+      ]);
+
+      if (!requestHandled || !requestSucceeded) {
+        throw new Error("Crawler gagal menyelesaikan request Adobe Stock");
+      }
+      if (selectedProxy) await markProxySuccess(selectedProxy.id);
+    } catch (error) {
+      if (selectedProxy) {
+        await markProxyFailure(
+          selectedProxy.id,
+          error instanceof Error ? error.message : "Crawler gagal melalui proxy"
+        );
+      }
+      throw error;
+    }
 }

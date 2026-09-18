@@ -12,7 +12,7 @@ module.exports = {
       restart_delay: 5_000,
       min_uptime: "10s",
       max_restarts: 10,
-      max_memory_restart: "550M",
+      max_memory_restart: "2G",
       kill_timeout: 10_000,
       listen_timeout: 10_000,
       time: true,

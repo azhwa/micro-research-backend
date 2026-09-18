@@ -1,0 +1,11 @@
+node_modules/
+dist/
+storage/
+logs/
+.playwright-mcp/
+.env*
+!.env.example
+*.log
+.git/
+.gitignore
+README.md
