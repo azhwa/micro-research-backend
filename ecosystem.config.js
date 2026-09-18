@@ -21,8 +21,8 @@ module.exports = {
       error_file: "./logs/backend-error.log",
       env_production: {
         NODE_ENV: "production",
-        HOST: "127.0.0.1",
-        PORT: 3000
+        HOST: "0.0.0.0",
+        PORT: 3315
       }
     }
   ]
