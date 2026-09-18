@@ -302,6 +302,48 @@ async function ensureAdobeSearchPage(
   return { httpStatus, searchInputReady };
 }
 
+async function selectAdobeSort(
+  page: Page,
+  sortValue: string,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    const remaining = Math.max(500, deadline - Date.now());
+    const select = page.locator(SORT_SELECT_SELECTOR).first();
+
+    try {
+      // Adobe renders the select immediately but keeps it disabled while the
+      // query result shell is still being updated. Wait for the actual
+      // control state and requested option, not only selector visibility.
+      await page.waitForFunction(
+        ({ selector, value }) => {
+          const element = document.querySelector(selector);
+          return element instanceof HTMLSelectElement
+            && !element.disabled
+            && Array.from(element.options).some((option) => option.value === value);
+        },
+        { selector: SORT_SELECT_SELECTOR, value: sortValue },
+        { timeout: Math.min(remaining, 5_000) }
+      );
+
+      await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
+      if (await select.inputValue() === sortValue) return;
+      lastError = new Error(`Adobe tidak mempertahankan sort '${sortValue}'`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await page.waitForTimeout(Math.min(500, Math.max(100, deadline - Date.now())));
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Dropdown sort Adobe belum siap untuk '${sortValue}'`);
+}
+
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
   const title = await page.title().catch(() => "");
@@ -665,7 +707,7 @@ async function collectSearchResults(
   const sortValue = adobeSortValue(sortMode);
   try {
     await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
-    await sortSelect.selectOption(sortValue);
+    await selectAdobeSort(page, sortValue, Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS));
     await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
     await page.waitForTimeout(500);
 
