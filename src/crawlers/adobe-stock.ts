@@ -256,11 +256,23 @@ const AUTOCOMPLETE_PANEL_SELECTOR =
 const AUTOCOMPLETE_ITEM_SELECTOR =
   '.js-search-autocomplete-panel li, [role="listbox"] [role="option"], [data-t="search-autocomplete"] li';
 const SORT_SELECT_SELECTOR = 'select[data-t="search-sort-menu"]';
+// Adobe may return a short-lived HTTP 403 challenge before replacing it with
+// the real search page. Wait for that transition before classifying a query.
+const ADOBE_CHALLENGE_WAIT_MS = 30_000;
 
 function adobeSortValue(sortMode: SortMode): string {
   if (sortMode === "downloads") return "nb_downloads";
   if (sortMode === "recent") return "creation";
   return "relevance";
+}
+
+async function waitForAdobeSearchInput(page: Page, timeoutMs = ADOBE_CHALLENGE_WAIT_MS): Promise<boolean> {
+  return page
+    .locator(AUTOCOMPLETE_INPUT_SELECTOR)
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
 }
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
@@ -602,8 +614,16 @@ async function collectSearchResults(
   const httpStatus = response?.status() ?? null;
 
   const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
+  const searchInputReady = await waitForAdobeSearchInput(page);
+  if (!searchInputReady) {
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
+    throw new CrawlerStageError(
+      `Halaman Adobe belum siap setelah menunggu challenge ${ADOBE_CHALLENGE_WAIT_MS}ms pada ${diagnostics.url}`,
+      diagnostics.botDetected ? "bot_detected" : "selector_timeout"
+    );
+  }
+
   try {
-    await input.waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 10_000) });
     await input.fill(query);
     await input.press("Enter");
     await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
@@ -618,7 +638,7 @@ async function collectSearchResults(
   const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
   const sortValue = adobeSortValue(sortMode);
   try {
-    await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, 10_000) });
+    await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
     await sortSelect.selectOption(sortValue);
     await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
     await page.waitForTimeout(500);
@@ -631,7 +651,9 @@ async function collectSearchResults(
     const diagnostics = await getPageDiagnostics(page, httpStatus);
     throw new CrawlerStageError(
       `Dropdown sort Adobe tidak dapat dipilih (${sortValue}) pada ${diagnostics.url}: ${errorMessage(error)}`,
-      classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
+      diagnostics.botDetected
+        ? "bot_detected"
+        : classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
     );
   }
 
@@ -1115,18 +1137,14 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           timeout: navigationTimeout
         });
         const httpStatus = response?.status() ?? null;
-        await page
-          .locator(AUTOCOMPLETE_INPUT_SELECTOR)
-          .first()
-          .waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 5_000) })
-          .catch(() => undefined);
+        const searchInputReady = await waitForAdobeSearchInput(page);
         const diagnostics = await getPageDiagnostics(page, httpStatus);
-        if (diagnostics.botDetected) {
+        if (!searchInputReady || diagnostics.botDetected) {
           await appendResearchEvent(
             researchRunId,
             "warning",
             "search_page_diagnostic",
-            `Halaman autocomplete Adobe berisi challenge${httpStatus !== null ? ` (HTTP ${httpStatus})` : ""}; crawler memakai fallback`,
+            `Halaman autocomplete Adobe belum siap setelah menunggu challenge${httpStatus !== null ? ` (HTTP ${httpStatus})` : ""}; crawler memakai fallback`,
             {
               diagnostic: "challenge_page",
               pageUrl: diagnostics.url,
