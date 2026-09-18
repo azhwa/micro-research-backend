@@ -346,13 +346,17 @@ async function selectAdobeSort(
       if (!state.disabled && state.optionExists) {
         await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
         await page.waitForFunction(
-          ({ selector, value }) => {
+          ({ selector, value, requestedQuery }) => {
             const element = document.querySelector(selector);
+            const url = new URL(location.href);
+            const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
             return element instanceof HTMLSelectElement
               && element.value === value
+              && url.searchParams.get("order") === value
+              && currentQuery === requestedQuery.trim().toLowerCase()
               && !element.disabled;
           },
-          { selector: SORT_SELECT_SELECTOR, value: sortValue },
+          { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query },
           { timeout: Math.min(remaining, 10_000) }
         );
         return;
@@ -1479,6 +1483,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         return attempted;
       };
       for (const suggestion of queryTargets) {
+        const queryLabel = suggestion.suggestion || "Page One";
         for (const sortMode of sortModes) {
           const latestRun = await getResearchRun(researchRunId);
           if (!latestRun || latestRun.status === "cancelled") {
@@ -1506,15 +1511,15 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             researchRunId,
             "info",
             "query_started",
-            `Memproses ${sortMode} untuk “${suggestion.suggestion}”`,
-            { query: suggestion.suggestion, sortMode }
+            `Memproses ${sortMode} untuk ${queryLabel}`,
+            { query: suggestion.suggestion || null, sortMode }
           );
 
           let searchResult;
           try {
             searchResult = await withRetry(
               researchRunId,
-              `Query ${sortMode} â€œ${suggestion.suggestion}â€`,
+              `Query ${sortMode} ${queryLabel}`,
               () => collectSearchResults(
                 page,
                 suggestion.suggestion,
@@ -1558,7 +1563,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             "query_completed",
             `Query ${sortMode} tersimpan: ${searchResult.assets.length} asset`,
             {
-              query: suggestion.suggestion,
+              query: suggestion.suggestion || null,
               sortMode,
               assets: searchResult.assets.length,
               resultCount: searchResult.resultCount
