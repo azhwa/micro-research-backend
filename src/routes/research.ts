@@ -40,7 +40,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
     "/api/research-runs",
     async (request, reply) => {
       const body = request.body ?? {};
-      const keyword = typeof body.keyword === "string" ? body.keyword.trim() : "";
+      const requestedKeyword = typeof body.keyword === "string" ? body.keyword.trim() : "";
       const category = typeof body.category === "string" && body.category.trim()
         ? body.category.trim().slice(0, 40)
         : "general";
@@ -52,11 +52,14 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       const assetsPerQuery = positiveInteger(body.assetsPerQuery, 30);
       const autocompleteEnabled = body.autocompleteEnabled !== false;
       const mode: ResearchMode = body.mode === "fast" ? "fast" : body.mode === "primary" ? "primary" : "full";
+      const keyword = mode === "primary" ? "" : requestedKeyword;
 
-      if (!keyword || keyword.length > 120) {
+      if ((mode !== "primary" && !keyword) || keyword.length > 120) {
         return reply.status(400).send({
           error: "INVALID_KEYWORD",
-          message: "keyword wajib diisi dan maksimal 120 karakter"
+          message: mode === "primary"
+            ? "keyword maksimal 120 karakter"
+            : "keyword wajib diisi dan maksimal 120 karakter"
         });
       }
 

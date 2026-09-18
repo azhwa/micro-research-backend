@@ -282,12 +282,14 @@ async function ensureAdobeSearchPage(
   page: Page,
   assetType: string,
   locale: string,
-  navigationTimeout: number
+  navigationTimeout: number,
+  requireCleanQuery = false
 ) {
   const targetUrl = new URL(searchPageUrl(assetType, locale));
   const currentUrl = new URL(page.url());
   const alreadyOnSearchPage = currentUrl.origin === targetUrl.origin
-    && currentUrl.pathname === targetUrl.pathname;
+    && currentUrl.pathname === targetUrl.pathname
+    && (!requireCleanQuery || !currentUrl.searchParams.has("k"));
   let httpStatus: number | null = null;
 
   // PlaywrightCrawler has already navigated to the start URL before calling
@@ -734,16 +736,18 @@ async function collectSearchResults(
   navigationTimeout: number,
   selectorTimeout: number
 ) {
-  // Use the same browser flow as a real user: open the clean search page,
-  // type the keyword into Adobe's search input, submit it, then choose the
-  // sort option from Adobe's own dropdown. Sending `order=nb_downloads`
-  // directly in the first URL can be treated differently by Adobe's bot
-  // protection and does not always match the UI state.
+  // Use the same browser flow as a real user. Page One deliberately keeps the
+  // clean Adobe feed without a `k` parameter; keyword research types the
+  // requested keyword first, then both flows choose the sort from Adobe's
+  // own dropdown. Sending `order=...` directly is unreliable with Adobe's
+  // bot protection and does not always match the UI state.
+  const isPageOne = query.trim() === "";
   const { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
     page,
     assetType,
     locale,
-    navigationTimeout
+    navigationTimeout,
+    isPageOne
   );
   const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
   if (!searchInputReady) {
@@ -754,16 +758,18 @@ async function collectSearchResults(
     );
   }
 
-  try {
-    await input.fill(query);
-    await input.press("Enter");
-    await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-  } catch (error) {
-    const diagnostics = await getPageDiagnostics(page, httpStatus);
-    throw new CrawlerStageError(
-      `Input pencarian Adobe tidak dapat digunakan pada ${diagnostics.url}: ${errorMessage(error)}`,
-      classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
-    );
+  if (!isPageOne) {
+    try {
+      await input.fill(query);
+      await input.press("Enter");
+      await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+    } catch (error) {
+      const diagnostics = await getPageDiagnostics(page, httpStatus);
+      throw new CrawlerStageError(
+        `Input pencarian Adobe tidak dapat digunakan pada ${diagnostics.url}: ${errorMessage(error)}`,
+        classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
+      );
+    }
   }
 
   const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
@@ -1347,15 +1353,15 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       let suggestionResult: Awaited<ReturnType<typeof collectSuggestions>>;
       if (mode === "primary") {
         suggestionResult = {
-          rows: [{ baseKeyword: run.seedKeyword, suggestion: run.seedKeyword, position: 1, prefix: null }],
+          rows: [],
           source: "seed_fallback"
         };
         await appendResearchEvent(
           researchRunId,
           "info",
           "primary_page_one_started",
-          `Primary Page-One Snapshot dimulai untuk seed “${run.seedKeyword}”`,
-          { seedKeyword: run.seedKeyword, sortModes, assetsPerSort: run.assetsPerQuery }
+          "Primary Page-One Snapshot dimulai tanpa keyword",
+          { sortModes, assetsPerSort: run.assetsPerQuery, query: null }
         );
       } else if (run.autocompleteEnabled) {
         // Autocomplete must start from the clean Adobe search page. The
@@ -1428,14 +1434,19 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         researchRunId,
         suggestionResult.source === "adobe_autocomplete" ? "success" : "info",
         "suggestions_collected",
-        suggestionResult.source === "adobe_autocomplete"
+        mode === "primary"
+          ? "Page One tidak memakai keyword atau autocomplete"
+          : suggestionResult.source === "adobe_autocomplete"
           ? `${suggestionRows.length} suggestion Adobe berhasil ditemukan`
           : `Research dilanjutkan dengan seed keyword “${run.seedKeyword}”`,
-        { count: suggestionRows.length, source: suggestionResult.source }
+        { count: suggestionRows.length, source: suggestionResult.source, query: mode === "primary" ? null : run.seedKeyword }
       );
 
       const database = getDatabase();
-      const total = suggestionRows.length * sortModes.length;
+      const queryTargets = mode === "primary"
+        ? [{ suggestion: "", position: 0 }]
+        : suggestionRows;
+      const total = queryTargets.length * sortModes.length;
       const resumeState = await loadResumeState(researchRunId);
       let completed = [...resumeState.completedKeys].length;
       await database
@@ -1467,7 +1478,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         }
         return attempted;
       };
-      for (const suggestion of suggestionRows) {
+      for (const suggestion of queryTargets) {
         for (const sortMode of sortModes) {
           const latestRun = await getResearchRun(researchRunId);
           if (!latestRun || latestRun.status === "cancelled") {
