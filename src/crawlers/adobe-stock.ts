@@ -257,6 +257,7 @@ const AUTOCOMPLETE_PANEL_SELECTOR =
 const AUTOCOMPLETE_ITEM_SELECTOR =
   '.js-search-autocomplete-panel li, [role="listbox"] [role="option"], [data-t="search-autocomplete"] li';
 const SORT_SELECT_SELECTOR = 'select[data-t="search-sort-menu"]';
+const ADOBE_RESULT_SELECTOR = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
 // Adobe may return a short-lived HTTP 403 challenge before replacing it with
 // the real search page. Wait for that transition before classifying a query.
 const ADOBE_CHALLENGE_WAIT_MS = 30_000;
@@ -306,7 +307,8 @@ async function ensureAdobeSearchPage(
 async function selectAdobeSort(
   page: Page,
   sortValue: string,
-  timeoutMs: number
+  timeoutMs: number,
+  query: string
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
@@ -316,22 +318,33 @@ async function selectAdobeSort(
     const select = page.locator(SORT_SELECT_SELECTOR).first();
 
     try {
-      // Adobe renders the select immediately but keeps it disabled while the
-      // query result shell is still being updated. Wait for the actual
-      // control state and requested option, not only selector visibility.
-      await page.waitForFunction(
-        ({ selector, value }) => {
-          const element = document.querySelector(selector);
-          return element instanceof HTMLSelectElement
-            && !element.disabled
-            && Array.from(element.options).some((option) => option.value === value);
-        },
-        { selector: SORT_SELECT_SELECTOR, value: sortValue },
-        { timeout: Math.min(remaining, 5_000) }
-      );
+      const state = await page.evaluate(({ selector, value, requestedQuery, resultSelector }) => {
+        const element = document.querySelector(selector);
+        const url = new URL(location.href);
+        const normalizedQuery = requestedQuery.trim().toLowerCase();
+        const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
 
-      await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
-      if (await select.inputValue() === sortValue) return;
+        return {
+          value: element instanceof HTMLSelectElement ? element.value : null,
+          disabled: element instanceof HTMLSelectElement ? element.disabled : true,
+          optionExists: element instanceof HTMLSelectElement
+            && Array.from(element.options).some((option) => option.value === value),
+          urlSort: url.searchParams.get("order"),
+          queryMatches: currentQuery === normalizedQuery,
+          resultCount: document.querySelectorAll(resultSelector).length
+        };
+      }, { selector: SORT_SELECT_SELECTOR, value: sortValue, requestedQuery: query, resultSelector: ADOBE_RESULT_SELECTOR });
+
+      // Adobe can keep the native select disabled while the SPA is rendering,
+      // even though it already applied the requested sort to the URL/state.
+      // In that case the result loader is the readiness signal, not disabled.
+      if (state.value === sortValue && state.urlSort === sortValue && state.queryMatches) return;
+
+      if (!state.disabled && state.optionExists) {
+        await select.selectOption(sortValue, { timeout: Math.min(remaining, 5_000) });
+        if (await select.inputValue() === sortValue) return;
+      }
+
       lastError = new Error(`Adobe tidak mempertahankan sort '${sortValue}'`);
     } catch (error) {
       lastError = error;
@@ -343,6 +356,34 @@ async function selectAdobeSort(
   throw lastError instanceof Error
     ? lastError
     : new Error(`Dropdown sort Adobe belum siap untuk '${sortValue}'`);
+}
+
+async function waitForAdobeResults(
+  page: Page,
+  query: string,
+  sortValue: string,
+  timeoutMs: number
+): Promise<boolean> {
+  return page
+    .waitForFunction(
+      ({ requestedQuery, expectedSort, resultSelector, sortSelector }) => {
+        const url = new URL(location.href);
+        const currentQuery = (url.searchParams.get("k") || "").trim().toLowerCase();
+        const queryMatches = currentQuery === requestedQuery.trim().toLowerCase();
+        const select = document.querySelector(sortSelector);
+        const selectedValue = select instanceof HTMLSelectElement ? select.value : null;
+        const sortMatches = url.searchParams.get("order") === expectedSort || selectedValue === expectedSort;
+        const body = document.body?.innerText || "";
+        const noResults = /no results|0 results|didn't find any/i.test(body);
+        const resultCount = document.querySelectorAll(resultSelector).length;
+
+        return queryMatches && sortMatches && (resultCount > 0 || noResults);
+      },
+      { requestedQuery: query, expectedSort: sortValue, resultSelector: ADOBE_RESULT_SELECTOR, sortSelector: SORT_SELECT_SELECTOR },
+      { timeout: timeoutMs }
+    )
+    .then(() => true)
+    .catch(() => false);
 }
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
@@ -707,14 +748,19 @@ async function collectSearchResults(
 
   const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
   const sortValue = adobeSortValue(sortMode);
+  const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
   try {
     await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
-    await selectAdobeSort(page, sortValue, Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS));
+    await selectAdobeSort(page, sortValue, Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS), query);
     await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-    await page.waitForTimeout(500);
+    const resultReady = await waitForAdobeResults(page, query, sortValue, resultSelectorTimeout);
+    if (!resultReady) {
+      throw new Error(`Hasil Adobe belum siap setelah sort '${sortValue}'`);
+    }
 
     const selectedSortValue = await sortSelect.inputValue();
-    if (selectedSortValue !== sortValue) {
+    const currentUrlSort = new URL(page.url()).searchParams.get("order");
+    if (selectedSortValue !== sortValue && currentUrlSort !== sortValue) {
       throw new Error(`Adobe memilih sort '${selectedSortValue}', expected '${sortValue}'`);
     }
   } catch (error) {
@@ -727,13 +773,11 @@ async function collectSearchResults(
     );
   }
 
-  const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
   // Fast mode reduces query count, but headed Chromium on the VPS can still
   // need more time for Adobe's result cards to be inserted after the HTML
   // shell and result count have already appeared.
-  const resultSelectorTimeout = Math.max(selectorTimeout, 20_000);
   const selectorFound = await page
-    .waitForSelector(resultSelector, { timeout: resultSelectorTimeout })
+    .waitForSelector(ADOBE_RESULT_SELECTOR, { timeout: resultSelectorTimeout })
     .then(() => true)
     .catch(() => false);
 
