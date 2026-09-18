@@ -12,7 +12,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends procps xvfb xauth \
     && rm -rf /var/lib/apt/lists/* \
     && npm ci \
-    && npx playwright install --with-deps chromium
+    && npx playwright install --with-deps chromium \
+    && npx playwright install --list
 
 FROM dependencies AS builder
 
@@ -45,6 +46,8 @@ RUN chmod +x ./docker-entrypoint.sh \
     && chown -R node:node /ms-playwright /app/docker-entrypoint.sh
 
 USER node
+
+RUN node -e "const { chromium } = require('playwright'); (async () => { const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }); await browser.close(); })().catch((error) => { console.error(error); process.exit(1); });"
 
 EXPOSE 3315
 
