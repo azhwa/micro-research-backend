@@ -85,6 +85,20 @@
       "when": 1789448618907,
       "tag": "0011_sloppy_nightcrawler",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1789728571462,
+      "tag": "0012_slimy_kulan_gath",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1789729440685,
+      "tag": "0013_bizarre_cloak",
+      "breakpoints": true
     }
   ]
 }

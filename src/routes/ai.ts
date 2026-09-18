@@ -24,7 +24,7 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
         assetType: typeof request.body?.assetType === "string" ? request.body.assetType : undefined,
         locale: typeof request.body?.locale === "string" ? request.body.locale : undefined,
         category: typeof request.body?.category === "string" ? request.body.category : undefined
-      });
+      }, request.auth);
       if (!result) {
         return reply.status(400).send({
           error: "GLOBAL_CONTEXT_EMPTY",

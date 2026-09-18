@@ -4,6 +4,7 @@ import { getDatabase } from "../db/client";
 import { aiRecommendations } from "../db/schema";
 import { getAiContext } from "./insights.service";
 import { getGlobalAiContext } from "./snapshot.service";
+import type { AuthContext } from "../auth";
 import { DEFAULT_GEMINI_MODEL, generateWithUserGeminiKey } from "./gemini.service";
 
 const DEFAULT_PROMPT_VERSION = "recommendation-v1";
@@ -131,14 +132,15 @@ export async function listGlobalAiRecommendations(limit = 20) {
 
 export async function generateGlobalAiRecommendation(
   userId: string,
-  options: { model?: string; assetType?: string; locale?: string; category?: string } = {}
+  options: { model?: string; assetType?: string; locale?: string; category?: string } = {},
+  auth?: AuthContext | null
 ) {
   const model = options.model?.trim() || DEFAULT_GEMINI_MODEL;
   const context = await getGlobalAiContext({
     assetType: options.assetType,
     locale: options.locale,
     category: options.category
-  });
+  }, auth);
   if (!context.topKeywords.length && !context.topAssets.length) return null;
 
   const { generatedAt: _generatedAt, ...stableContext } = context;

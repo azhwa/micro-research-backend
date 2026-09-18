@@ -44,7 +44,11 @@ export const researchRuns = sqliteTable(
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" })
   },
-  (table) => [index("research_runs_status_idx").on(table.status)]
+  (table) => [
+    index("research_runs_status_idx").on(table.status),
+    index("research_runs_owner_idx").on(table.ownerClerkUserId),
+    index("research_runs_org_idx").on(table.organizationId)
+  ]
 );
 
 export const researchJobs = sqliteTable(
@@ -98,6 +102,8 @@ export const suggestions = sqliteTable(
     suggestion: text("suggestion").notNull(),
     position: integer("position").notNull(),
     source: text("source").notNull().default("autocomplete"),
+    isSeed: integer("is_seed", { mode: "boolean" }).notNull().default(false),
+    autocompletePrefix: text("autocomplete_prefix"),
     locale: text("locale").notNull().default("en-US"),
     observedAt: observedAt()
   },
@@ -119,6 +125,11 @@ export const searchQueries = sqliteTable(
     sortMode: text("sort_mode").notNull(),
     page: integer("page").notNull().default(1),
     resultCount: integer("result_count"),
+    resultCountRaw: text("result_count_raw"),
+    resultCountQualifier: text("result_count_qualifier").notNull().default("unknown"),
+    requestedLimit: integer("requested_limit").notNull().default(0),
+    collectedCount: integer("collected_count").notNull().default(0),
+    collectionStatus: text("collection_status").notNull().default("completed"),
     isComplete: integer("is_complete", { mode: "boolean" }).notNull().default(false),
     locale: text("locale").notNull().default("en-US"),
     observedAt: observedAt()
@@ -244,12 +255,16 @@ export const keywordOpportunitySnapshots = sqliteTable(
     freshnessScore: real("freshness_score").notNull().default(0),
     consistencyScore: real("consistency_score").notNull().default(0),
     opportunityScore: real("opportunity_score").notNull().default(0),
+    scoringVersion: text("scoring_version").notNull().default("mvp-1"),
+    scoreStatus: text("score_status").notNull().default("scored"),
+    rankLevel: integer("rank_level").notNull().default(0),
     observedAt: observedAt()
   },
   (table) => [
     index("keyword_snapshots_keyword_idx").on(table.normalizedKeyword),
     index("keyword_snapshots_run_idx").on(table.researchRunId),
     index("keyword_snapshots_score_idx").on(table.opportunityScore),
+    index("keyword_snapshots_version_status_idx").on(table.scoringVersion, table.scoreStatus),
     uniqueIndex("keyword_snapshots_unique_idx").on(
       table.researchRunId,
       table.normalizedKeyword,
@@ -275,11 +290,14 @@ export const assetOpportunitySnapshots = sqliteTable(
     bestRelevanceRank: integer("best_relevance_rank"),
     keywordCount: integer("keyword_count").notNull().default(0),
     assetScore: real("asset_score").notNull().default(0),
+    scoringVersion: text("scoring_version").notNull().default("mvp-1"),
+    scoreStatus: text("score_status").notNull().default("scored"),
     observedAt: observedAt()
   },
   (table) => [
     index("asset_snapshots_run_idx").on(table.researchRunId),
     index("asset_snapshots_asset_idx").on(table.assetId),
+    index("asset_snapshots_version_status_idx").on(table.scoringVersion, table.scoreStatus),
     uniqueIndex("asset_snapshots_unique_idx").on(table.researchRunId, table.assetId)
   ]
 );

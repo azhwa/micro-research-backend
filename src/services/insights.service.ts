@@ -1,485 +1,295 @@
 import { asc, eq } from "drizzle-orm";
-import {
-  assetKeywords,
-  assetObservations,
-  assets,
-  searchQueries,
-  suggestions
-} from "../db/schema";
+import { assetKeywords, assetObservations, assets, searchQueries, suggestions } from "../db/schema";
 import { getDatabase } from "../db/client";
 import { getResearchRun } from "./research.service";
+import { dataAgeStatus, lowCompetitionScore, normalizeKeyword, rankSignal, type ResultCountQualifier } from "./research-metrics";
 
 type SortMode = "downloads" | "relevance" | "recent";
-export const SCORING_VERSION = "mvp-1";
+type Confidence = "low" | "medium" | "high";
+type ScoreStatus = "scored" | "provisional" | "insufficient_data" | "not_directly_researched";
+type KeywordLevel = 0 | 1 | 2 | 3 | 4 | 5;
+export const SCORING_VERSION = "candidate-v2";
 
-interface SuggestionRow {
-  suggestion: string;
-  position: number;
-}
-
-interface KeywordRow {
-  keyword: string;
-  normalizedKeyword: string;
-  assetId: string;
-  source: string;
-}
-
-interface ObservationRow {
-  assetId: string;
-  externalId: string;
-  title: string;
-  assetUrl: string;
-  thumbnailUrl: string | null;
-  assetType: string;
-  width: number | null;
-  height: number | null;
-  isPremium: boolean;
-  query: string;
-  sortMode: string;
-  rank: number;
-  resultCount: number | null;
-}
+interface SuggestionRow { suggestion: string; position: number; source: string; isSeed: boolean; autocompletePrefix: string | null; observedAt: Date }
+interface KeywordRow { keyword: string; normalizedKeyword: string; assetId: string; source: string; position: number; observedAt: Date }
+interface QueryRow { id: string; query: string; normalizedQuery: string; sortMode: string; resultCount: number | null; resultCountQualifier: string; requestedLimit: number; collectedCount: number; collectionStatus: string; isComplete: boolean; observedAt: Date }
+interface ObservationRow { assetId: string; externalId: string; title: string; assetUrl: string; thumbnailUrl: string | null; assetType: string; width: number | null; height: number | null; isPremium: boolean; query: string; normalizedQuery: string; sortMode: string; rank: number; requestedLimit: number; observedAt: Date }
 
 export interface KeywordOpportunity {
-  keyword: string;
-  normalizedKeyword: string;
-  source: string;
-  autocompletePosition: number | null;
-  suggestionFrequency: number;
-  queryCount: number;
-  assetCount: number;
-  bestDownloadRank: number | null;
-  averageDownloadRank: number | null;
-  bestRecentRank: number | null;
-  resultCount: number | null;
-  demandScore: number;
-  competitionScore: number;
-  freshnessScore: number;
-  consistencyScore: number;
-  opportunityScore: number;
+  keyword: string; normalizedKeyword: string; source: string; isSeed: boolean;
+  researchStatus: "directly_researched" | "discovered"; scoreStatus: ScoreStatus;
+  rank: number | null; score: number | null; opportunityScore: number | null;
+  level: KeywordLevel; label: string; indicator: string; confidence: Confidence;
+  autocompletePosition: number | null; suggestionFrequency: number; queryCount: number;
+  assetCount: number; supportingAssetCount: number; enrichedSampleCount: number;
+  bestDownloadRank: number | null; averageDownloadRank: number | null;
+  bestRecentRank: number | null; bestRelevanceRank: number | null;
+  resultCount: number | null; resultCountQualifier: ResultCountQualifier;
+  downloadSignalScore: number | null; lowCompetitionScore: number | null;
+  relevanceSignalScore: number | null; freshnessSignalScore: number | null;
+  crossSortScore: number | null; autocompleteScore: number | null;
+  evidenceQueries: string[]; firstObservedAt: Date | null; lastObservedAt: Date | null;
 }
 
 export interface AssetOpportunity {
-  assetId: string;
-  externalId: string;
-  title: string;
-  assetUrl: string;
-  thumbnailUrl: string | null;
-  assetType: string;
-  width: number | null;
-  height: number | null;
-  isPremium: boolean;
-  appearances: number;
-  sortModes: string[];
-  bestDownloadRank: number | null;
-  bestRecentRank: number | null;
-  bestRelevanceRank: number | null;
-  keywordCount: number;
-  assetScore: number;
+  assetId: string; externalId: string; title: string; assetUrl: string; thumbnailUrl: string | null;
+  assetType: string; width: number | null; height: number | null; isPremium: boolean; query: string;
+  appearances: number; sortModes: string[]; sortCoverage: number; evaluatedSortCount: number;
+  crossSortLabel: "strong_consensus" | "multi_signal" | "single_signal" | "partial_evidence";
+  sortStatus: Record<SortMode, "found" | "not_observed_in_sample" | "not_collected" | "failed">;
+  evidence: string[]; ranks: Record<SortMode, number | null>;
+  bestDownloadRank: number | null; bestRecentRank: number | null; bestRelevanceRank: number | null;
+  keywordCount: number; assetScore: number | null; scoreStatus: "scored" | "insufficient_data";
+  firstObservedAt: Date | null; lastObservedAt: Date | null;
 }
 
 export interface ResearchSummary {
-  runId: string;
-  scoringVersion: string;
-  generatedAt: string;
-  totals: {
-    suggestions: number;
-    queries: number;
-    expectedQueries: number;
-    uniqueAssets: number;
-    keywords: number;
-  };
-  dataQuality: {
-    queryCoveragePct: number;
-    keywordCoveragePct: number;
-    completenessScore: number;
-    confidence: "low" | "medium" | "high";
-    warnings: string[];
-    downloadsAssets: number;
-    assetsWithKeywords: number;
-    missingKeywordAssets: number;
-    resultCountsAvailable: number;
-  };
-  scores: {
-    demandScore: number;
-    competitionScore: number;
-    freshnessScore: number;
-    consistencyScore: number;
-    opportunityScore: number;
-  };
-  topKeywords: KeywordOpportunity[];
-  topAssets: AssetOpportunity[];
+  runId: string; scoringVersion: string; generatedAt: string;
+  dataAge: { firstObservedAt: Date | null; lastObservedAt: Date | null; dataAgeDays: number | null; status: "fresh" | "aging" | "stale" | "refresh_recommended" | "unknown"; refreshRecommended: boolean };
+  totals: { suggestions: number; queries: number; expectedQueries: number; uniqueAssets: number; keywords: number; scoredKeywords: number };
+  dataQuality: { queryCoveragePct: number; keywordCoveragePct: number; completenessScore: number; confidence: Confidence; warnings: string[]; downloadsAssets: number; assetsWithKeywords: number; missingKeywordAssets: number; resultCountsAvailable: number };
+  scores: { demandScore: number | null; competitionScore: number | null; freshnessScore: number | null; consistencyScore: number | null; opportunityScore: number | null };
+  topKeywords: KeywordOpportunity[]; topAssets: AssetOpportunity[];
 }
 
-function clamp(value: number, min = 0, max = 100) {
-  return Math.min(max, Math.max(min, value));
+const clamp = (value: number, min = 0, max = 100) => Math.min(max, Math.max(min, value));
+const round = (value: number) => Math.round(value * 10) / 10;
+const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+const averageNullable = (values: Array<number | null>) => {
+  const available = values.filter((value): value is number => value !== null);
+  return available.length ? round(average(available) as number) : null;
+};
+const minDate = (values: Date[]) => values.length ? new Date(Math.min(...values.map((value) => value.getTime()))) : null;
+const maxDate = (values: Date[]) => values.length ? new Date(Math.max(...values.map((value) => value.getTime()))) : null;
+
+function keywordLevel(score: number | null): { level: KeywordLevel; label: string; indicator: string } {
+  if (score === null) return { level: 0, label: "Data belum cukup", indicator: "outline" };
+  if (score < 20) return { level: 1, label: "Weak", indicator: "gray" };
+  if (score < 40) return { level: 2, label: "Low", indicator: "amber" };
+  if (score < 60) return { level: 3, label: "Normal", indicator: "green" };
+  if (score < 80) return { level: 4, label: "Good", indicator: "blue" };
+  return { level: 5, label: "Excellent", indicator: "violet" };
 }
 
-function round(value: number) {
-  return Math.round(value * 10) / 10;
+export function calculateKeywordSignalScore(input: { downloadSignalScore: number; lowCompetitionScore: number; relevanceSignalScore: number; freshnessSignalScore: number; crossSortScore: number; autocompleteScore: number }) {
+  return round(input.downloadSignalScore * 0.25 + input.lowCompetitionScore * 0.25 + input.relevanceSignalScore * 0.15 + input.freshnessSignalScore * 0.1 + input.crossSortScore * 0.15 + input.autocompleteScore * 0.1);
 }
 
-function average(values: number[]) {
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-}
-
-function rankScore(rank: number | null) {
-  if (!rank || rank < 1) return 0;
-  return clamp(100 - ((rank - 1) / 99) * 100);
-}
-
-function ranksScore(ranks: number[]) {
-  if (!ranks.length) return 0;
-  const strongest = [...ranks].sort((a, b) => a - b).slice(0, 3);
-  return round(strongest.reduce((sum, rank) => sum + rankScore(rank), 0) / strongest.length);
-}
-
-function competitionScore(resultCount: number | null) {
-  if (!resultCount || resultCount < 1) return 0;
-  // Lower result count means lower visible competition. Log scale prevents very
-  // large Adobe result counts from flattening every score to zero.
-  return round(clamp(100 - Math.log10(resultCount) * 14));
-}
-
-export function calculateOpportunityScore(input: {
-  demandScore: number;
-  freshnessScore: number;
-  consistencyScore: number;
-  competitionScore: number;
-}) {
-  return round(
-    input.demandScore * 0.4 +
-      input.freshnessScore * 0.2 +
-      input.consistencyScore * 0.2 +
-      input.competitionScore * 0.2
-  );
+/** Kept for compatibility with existing imports. New insights use calculateKeywordSignalScore. */
+export function calculateOpportunityScore(input: { demandScore: number; freshnessScore: number; consistencyScore: number; competitionScore: number }) {
+  return round(input.demandScore * 0.4 + input.freshnessScore * 0.2 + input.consistencyScore * 0.2 + input.competitionScore * 0.2);
 }
 
 async function loadResearchData(runId: string) {
   const database = getDatabase();
-  const [suggestionRows, keywordRows, observationRows] = await Promise.all([
-    database
-      .select({ suggestion: suggestions.suggestion, position: suggestions.position })
-      .from(suggestions)
-      .where(eq(suggestions.researchRunId, runId))
-      .orderBy(asc(suggestions.position)),
-    database
-      .select({
-        keyword: assetKeywords.keyword,
-        normalizedKeyword: assetKeywords.normalizedKeyword,
-        assetId: assetKeywords.assetId,
-        source: assetKeywords.source
-      })
-      .from(assetKeywords)
-      .where(eq(assetKeywords.researchRunId, runId)),
-    database
-      .select({
-        assetId: assets.id,
-        externalId: assets.externalId,
-        title: assets.title,
-        assetUrl: assets.assetUrl,
-        thumbnailUrl: assets.thumbnailUrl,
-        assetType: assets.assetType,
-        width: assets.width,
-        height: assets.height,
-        isPremium: assets.isPremium,
-        query: searchQueries.query,
-        sortMode: assetObservations.sortMode,
-        rank: assetObservations.rank,
-        resultCount: searchQueries.resultCount
-      })
-      .from(assetObservations)
-      .innerJoin(assets, eq(assetObservations.assetId, assets.id))
-      .innerJoin(searchQueries, eq(assetObservations.searchQueryId, searchQueries.id))
-      .where(eq(assetObservations.researchRunId, runId))
+  const [suggestionRows, keywordRows, queryRows, observationRows] = await Promise.all([
+    database.select({ suggestion: suggestions.suggestion, position: suggestions.position, source: suggestions.source, isSeed: suggestions.isSeed, autocompletePrefix: suggestions.autocompletePrefix, observedAt: suggestions.observedAt }).from(suggestions).where(eq(suggestions.researchRunId, runId)).orderBy(asc(suggestions.position)),
+    database.select({ keyword: assetKeywords.keyword, normalizedKeyword: assetKeywords.normalizedKeyword, assetId: assetKeywords.assetId, source: assetKeywords.source, position: assetKeywords.position, observedAt: assetKeywords.observedAt }).from(assetKeywords).where(eq(assetKeywords.researchRunId, runId)),
+    database.select({ id: searchQueries.id, query: searchQueries.query, sortMode: searchQueries.sortMode, resultCount: searchQueries.resultCount, resultCountQualifier: searchQueries.resultCountQualifier, requestedLimit: searchQueries.requestedLimit, collectedCount: searchQueries.collectedCount, collectionStatus: searchQueries.collectionStatus, isComplete: searchQueries.isComplete, observedAt: searchQueries.observedAt }).from(searchQueries).where(eq(searchQueries.researchRunId, runId)),
+    database.select({ assetId: assets.id, externalId: assets.externalId, title: assets.title, assetUrl: assets.assetUrl, thumbnailUrl: assets.thumbnailUrl, assetType: assets.assetType, width: assets.width, height: assets.height, isPremium: assets.isPremium, query: searchQueries.query, sortMode: assetObservations.sortMode, rank: assetObservations.rank, requestedLimit: searchQueries.requestedLimit, observedAt: assetObservations.observedAt }).from(assetObservations).innerJoin(assets, eq(assetObservations.assetId, assets.id)).innerJoin(searchQueries, eq(assetObservations.searchQueryId, searchQueries.id)).where(eq(assetObservations.researchRunId, runId))
   ]);
-
   return {
     suggestions: suggestionRows as SuggestionRow[],
     keywords: keywordRows as KeywordRow[],
-    observations: observationRows as ObservationRow[]
+    queries: queryRows.map((row) => ({ ...row, normalizedQuery: normalizeKeyword(row.query) })) as QueryRow[],
+    observations: observationRows.map((row) => ({ ...row, normalizedQuery: normalizeKeyword(row.query) })) as ObservationRow[]
   };
 }
 
-function buildKeywordOpportunities(
-  suggestionsRows: SuggestionRow[],
-  keywordRows: KeywordRow[],
-  observations: ObservationRow[]
-) {
-  const candidates = new Map<string, {
-    keyword: string;
-    sources: Set<string>;
-    positions: number[];
-    suggestionFrequency: number;
-    assetIds: Set<string>;
-    queryNames: Set<string>;
-    sortModes: Set<string>;
-    downloadRanks: number[];
-    recentRanks: number[];
-    resultCounts: number[];
-  }>();
-
-  const ensure = (normalizedKeyword: string, keyword: string) => {
-    const existing = candidates.get(normalizedKeyword);
+function buildKeywordOpportunities(seedKeyword: string, suggestionsRows: SuggestionRow[], keywordRows: KeywordRow[], queries: QueryRow[], observations: ObservationRow[]) {
+  const candidates = new Map<string, { keyword: string; sources: Set<string>; positions: number[]; prefixes: Set<string>; isSeed: boolean; assetIds: Set<string>; dates: Date[] }>();
+  const ensure = (normalized: string, keyword: string) => {
+    const existing = candidates.get(normalized);
     if (existing) return existing;
-    const created = {
-      keyword,
-      sources: new Set<string>(),
-      positions: [],
-      suggestionFrequency: 0,
-      assetIds: new Set<string>(),
-      queryNames: new Set<string>(),
-      sortModes: new Set<string>(),
-      downloadRanks: [],
-      recentRanks: [],
-      resultCounts: []
-    };
-    candidates.set(normalizedKeyword, created);
+    const created = { keyword, sources: new Set<string>(), positions: [] as number[], prefixes: new Set<string>(), isSeed: normalized === normalizeKeyword(seedKeyword), assetIds: new Set<string>(), dates: [] as Date[] };
+    candidates.set(normalized, created);
     return created;
   };
-
   for (const row of suggestionsRows) {
-    const normalized = row.suggestion.toLowerCase().replace(/\s+/g, " ").trim();
+    const normalized = normalizeKeyword(row.suggestion);
+    if (!normalized) continue;
     const candidate = ensure(normalized, row.suggestion);
-    candidate.sources.add("adobe_autocomplete");
-    candidate.positions.push(row.position);
-    candidate.suggestionFrequency += 1;
+    candidate.sources.add(row.source);
+    candidate.isSeed ||= row.isSeed;
+    if (row.source === "adobe_autocomplete" || row.source === "autocomplete") {
+      candidate.positions.push(row.position);
+      candidate.prefixes.add(row.autocompletePrefix ?? "legacy");
+    }
+    candidate.dates.push(row.observedAt);
   }
-
   for (const row of keywordRows) {
-    const candidate = ensure(row.normalizedKeyword, row.keyword);
+    const normalized = normalizeKeyword(row.normalizedKeyword || row.keyword);
+    if (!normalized) continue;
+    const candidate = ensure(normalized, row.keyword);
     candidate.sources.add(row.source);
     candidate.assetIds.add(row.assetId);
+    candidate.dates.push(row.observedAt);
   }
-
-  const candidatesByQuery = new Map<string, Set<string>>();
-  for (const row of suggestionsRows) {
-    const normalized = row.suggestion.toLowerCase().replace(/\s+/g, " ").trim();
-    const queryCandidates = candidatesByQuery.get(row.suggestion) ?? new Set<string>();
-    queryCandidates.add(normalized);
-    candidatesByQuery.set(row.suggestion, queryCandidates);
+  for (const row of queries) {
+    if (!row.normalizedQuery) continue;
+    const candidate = ensure(row.normalizedQuery, row.query);
+    candidate.sources.add("direct_search");
+    candidate.dates.push(row.observedAt);
   }
-  const candidatesByAsset = new Map<string, Set<string>>();
-  for (const row of keywordRows) {
-    const assetCandidates = candidatesByAsset.get(row.assetId) ?? new Set<string>();
-    assetCandidates.add(row.normalizedKeyword);
-    candidatesByAsset.set(row.assetId, assetCandidates);
-  }
-
-  for (const observation of observations) {
-    const matchingCandidates = new Set([
-      ...(candidatesByQuery.get(observation.query) ?? []),
-      ...(candidatesByAsset.get(observation.assetId) ?? [])
-    ]);
-    for (const normalized of matchingCandidates) {
-      const candidate = candidates.get(normalized);
-      if (!candidate) continue;
-
-      candidate.assetIds.add(observation.assetId);
-      candidate.queryNames.add(observation.query);
-      candidate.sortModes.add(observation.sortMode);
-      if (observation.resultCount !== null) candidate.resultCounts.push(observation.resultCount);
-      if (observation.sortMode === "downloads") candidate.downloadRanks.push(observation.rank);
-      if (observation.sortMode === "recent") candidate.recentRanks.push(observation.rank);
-    }
-  }
-
-  return [...candidates.entries()].map(([normalizedKeyword, candidate]): KeywordOpportunity => {
-    const bestDownloadRank = candidate.downloadRanks.length ? Math.min(...candidate.downloadRanks) : null;
-    const bestRecentRank = candidate.recentRanks.length ? Math.min(...candidate.recentRanks) : null;
-    const demandScore = ranksScore(candidate.downloadRanks);
-    const freshnessScore = ranksScore(candidate.recentRanks);
-    const consistencyScore = round(
-      (candidate.sortModes.size / 3) * 60 + clamp(candidate.queryNames.size / 3) * 40
-    );
-    const resultCount = candidate.resultCounts.length ? Math.min(...candidate.resultCounts) : null;
-    const competition = competitionScore(resultCount);
-    const opportunityScore = calculateOpportunityScore({
-      demandScore,
-      freshnessScore,
-      consistencyScore,
-      competitionScore: competition
-    });
-
-    return {
-      keyword: candidate.keyword,
-      normalizedKeyword,
-      source: [...candidate.sources].join(", "),
-      autocompletePosition: candidate.positions.length ? Math.min(...candidate.positions) : null,
-      suggestionFrequency: candidate.suggestionFrequency,
-      queryCount: candidate.queryNames.size,
-      assetCount: candidate.assetIds.size,
-      bestDownloadRank,
-      averageDownloadRank: average(candidate.downloadRanks) === null ? null : round(average(candidate.downloadRanks) as number),
-      bestRecentRank,
-      resultCount,
-      demandScore,
-      competitionScore: competition,
-      freshnessScore,
-      consistencyScore,
-      opportunityScore
+  const enrichedAssetIds = new Set(keywordRows.map((row) => row.assetId));
+  const all = [...candidates.entries()].map(([normalizedKeyword, candidate]): KeywordOpportunity => {
+    const directQueries = queries.filter((row) => row.normalizedQuery === normalizedKeyword && row.isComplete && row.collectionStatus === "completed");
+    const supportingObservations = observations.filter((row) => candidate.assetIds.has(row.assetId));
+    const evaluatedModes = new Set(directQueries.map((row) => row.sortMode));
+    const ranks = (mode: SortMode) => supportingObservations.filter((row) => row.sortMode === mode).map((row) => row.rank);
+    const downloadRanks = ranks("downloads");
+    const relevanceRanks = ranks("relevance");
+    const recentRanks = ranks("recent");
+    const bestDownloadRank = downloadRanks.length ? Math.min(...downloadRanks) : null;
+    const bestRelevanceRank = relevanceRanks.length ? Math.min(...relevanceRanks) : null;
+    const bestRecentRank = recentRanks.length ? Math.min(...recentRanks) : null;
+    const averageRankSignal = (mode: SortMode, values: number[]) => {
+      const limits = observations.filter((row) => row.sortMode === mode && candidate.assetIds.has(row.assetId)).map((row) => row.requestedLimit || 100);
+      const scores = values.map((rank, index) => rankSignal(rank, limits[index] ?? 100)).filter((value): value is number => value !== null);
+      return scores.length ? round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null;
     };
-  }).sort((a, b) => b.opportunityScore - a.opportunityScore || (a.autocompletePosition ?? 999) - (b.autocompletePosition ?? 999));
+    const downloadRankQuality = averageRankSignal("downloads", downloadRanks);
+    const supportingDownloadAssets = new Set(supportingObservations.filter((row) => row.sortMode === "downloads").map((row) => row.assetId));
+    const supportCoverage = enrichedAssetIds.size ? (supportingDownloadAssets.size / enrichedAssetIds.size) * 100 : null;
+    const downloadScore = downloadRankQuality === null || supportCoverage === null ? null : round(supportCoverage * 0.6 + downloadRankQuality * 0.4);
+    const relevanceScore = averageRankSignal("relevance", relevanceRanks);
+    const freshnessScore = averageRankSignal("recent", recentRanks);
+    const resultRows = directQueries.filter((row) => row.resultCount !== null);
+    const resultCount = resultRows.length ? Math.max(...resultRows.map((row) => row.resultCount as number)) : null;
+    const qualifier: ResultCountQualifier = resultRows.some((row) => row.resultCountQualifier === "at_least")
+      ? "at_least"
+      : resultRows.some((row) => row.resultCountQualifier === "approximate") ? "approximate" : resultRows.length ? "displayed" : "unknown";
+    const competition = lowCompetitionScore(resultCount, qualifier);
+    const modesByAssetAndQuery = new Map<string, Set<string>>();
+    for (const observation of supportingObservations) {
+      const key = `${observation.assetId}\u001f${observation.normalizedQuery}`;
+      const modes = modesByAssetAndQuery.get(key) ?? new Set<string>();
+      modes.add(observation.sortMode); modesByAssetAndQuery.set(key, modes);
+    }
+    const coverageValues = [...modesByAssetAndQuery.values()].map((modes) => (modes.size / 3) * 100);
+    const crossScore = evaluatedModes.size === 3 && coverageValues.length
+      ? round(coverageValues.reduce((sum, value) => sum + value, 0) / coverageValues.length)
+      : null;
+    const autocompletePosition = candidate.positions.length ? Math.min(...candidate.positions) : null;
+    const autocompleteScore = autocompletePosition === null ? null : rankSignal(autocompletePosition, 10);
+    const directlyResearched = directQueries.length > 0;
+    const allSignalsAvailable = evaluatedModes.size === 3 && downloadScore !== null && relevanceScore !== null && freshnessScore !== null && competition !== null && crossScore !== null && autocompleteScore !== null;
+    const score = allSignalsAvailable ? calculateKeywordSignalScore({ downloadSignalScore: downloadScore, lowCompetitionScore: competition, relevanceSignalScore: relevanceScore, freshnessSignalScore: freshnessScore, crossSortScore: crossScore, autocompleteScore }) : null;
+    const scoreStatus: ScoreStatus = !directlyResearched ? "not_directly_researched" : score !== null ? "provisional" : "insufficient_data";
+    const level = keywordLevel(score);
+    const evidenceDates = [...candidate.dates, ...directQueries.map((row) => row.observedAt), ...supportingObservations.map((row) => row.observedAt)];
+    return {
+      keyword: candidate.keyword, normalizedKeyword, source: [...candidate.sources].join(", "), isSeed: candidate.isSeed,
+      researchStatus: directlyResearched ? "directly_researched" : "discovered", scoreStatus, rank: null, score, opportunityScore: score,
+      level: level.level, label: scoreStatus === "not_directly_researched" ? "Belum diriset langsung" : level.label, indicator: level.indicator,
+      confidence: score === null ? "low" : supportingObservations.length >= 30 ? "high" : "medium",
+      autocompletePosition, suggestionFrequency: candidate.prefixes.size, queryCount: new Set(directQueries.map((row) => row.query)).size,
+      assetCount: candidate.assetIds.size, supportingAssetCount: candidate.assetIds.size, enrichedSampleCount: enrichedAssetIds.size,
+      bestDownloadRank, averageDownloadRank: averageNullable(downloadRanks), bestRecentRank, bestRelevanceRank,
+      resultCount, resultCountQualifier: qualifier, downloadSignalScore: downloadScore, lowCompetitionScore: competition,
+      relevanceSignalScore: relevanceScore, freshnessSignalScore: freshnessScore, crossSortScore: crossScore, autocompleteScore,
+      evidenceQueries: [...new Set(supportingObservations.map((row) => row.query))], firstObservedAt: minDate(evidenceDates), lastObservedAt: maxDate(evidenceDates)
+    };
+  });
+  all.sort((a, b) => a.isSeed !== b.isSeed ? (a.isSeed ? 1 : -1) : (a.score !== null || b.score !== null) ? (b.score ?? -1) - (a.score ?? -1) : b.supportingAssetCount - a.supportingAssetCount || (a.autocompletePosition ?? 999) - (b.autocompletePosition ?? 999));
+  let rank = 0;
+  for (const item of all) if (!item.isSeed && item.score !== null) item.rank = ++rank;
+  return all;
 }
 
-function buildAssetOpportunities(observations: ObservationRow[], keywords: KeywordRow[]) {
-  const grouped = new Map<string, {
-    first: ObservationRow;
-    appearances: number;
-    sortModes: Set<string>;
-    downloads: number[];
-    recent: number[];
-    relevance: number[];
-  }>();
-
-  for (const observation of observations) {
-    const current = grouped.get(observation.assetId) ?? {
-      first: observation,
-      appearances: 0,
-      sortModes: new Set<string>(),
-      downloads: [],
-      recent: [],
-      relevance: []
-    };
-    current.appearances += 1;
-    current.sortModes.add(observation.sortMode);
-    if (observation.sortMode === "downloads") current.downloads.push(observation.rank);
-    if (observation.sortMode === "recent") current.recent.push(observation.rank);
-    if (observation.sortMode === "relevance") current.relevance.push(observation.rank);
-    grouped.set(observation.assetId, current);
+function buildAssetOpportunities(queries: QueryRow[], observations: ObservationRow[], keywords: KeywordRow[]) {
+  const totalAppearances = new Map<string, number>();
+  for (const row of observations) totalAppearances.set(row.assetId, (totalAppearances.get(row.assetId) ?? 0) + 1);
+  const grouped = new Map<string, { first: ObservationRow; rows: ObservationRow[] }>();
+  for (const row of observations) {
+    const key = `${row.assetId}\u001f${row.normalizedQuery}`;
+    const current = grouped.get(key) ?? { first: row, rows: [] };
+    current.rows.push(row); grouped.set(key, current);
   }
-
-  return [...grouped.values()].map((item): AssetOpportunity => {
-    const bestDownloadRank = item.downloads.length ? Math.min(...item.downloads) : null;
-    const bestRecentRank = item.recent.length ? Math.min(...item.recent) : null;
-    const bestRelevanceRank = item.relevance.length ? Math.min(...item.relevance) : null;
-    const keywordCount = new Set(
-      keywords.filter((keyword) => keyword.assetId === item.first.assetId).map((keyword) => keyword.normalizedKeyword)
-    ).size;
-    const assetScore = round(
-      rankScore(bestDownloadRank) * 0.6 +
-      rankScore(bestRecentRank) * 0.2 +
-      clamp((item.appearances / 3) * 100) * 0.2
-    );
-
-    return {
-      assetId: item.first.assetId,
-      externalId: item.first.externalId,
-      title: item.first.title,
-      assetUrl: item.first.assetUrl,
-      thumbnailUrl: item.first.thumbnailUrl,
-      assetType: item.first.assetType,
-      width: item.first.width,
-      height: item.first.height,
-      isPremium: item.first.isPremium,
-      appearances: item.appearances,
-      sortModes: [...item.sortModes],
-      bestDownloadRank,
-      bestRecentRank,
-      bestRelevanceRank,
-      keywordCount,
-      assetScore
+  const candidates = [...grouped.values()].map((group): AssetOpportunity => {
+    const queryRows = queries.filter((row) => row.normalizedQuery === group.first.normalizedQuery && row.isComplete && row.collectionStatus === "completed");
+    const evaluatedModes = new Set(queryRows.map((row) => row.sortMode));
+    const bestRank = (mode: SortMode) => { const values = group.rows.filter((row) => row.sortMode === mode).map((row) => row.rank); return values.length ? Math.min(...values) : null; };
+    const bestDownloadRank = bestRank("downloads"), bestRelevanceRank = bestRank("relevance"), bestRecentRank = bestRank("recent");
+    const foundModes = new Set(group.rows.map((row) => row.sortMode));
+    const coverage = foundModes.size;
+    const statusFor = (mode: SortMode): AssetOpportunity["sortStatus"][SortMode] => {
+      if (foundModes.has(mode)) return "found";
+      const query = queries.find((row) => row.normalizedQuery === group.first.normalizedQuery && row.sortMode === mode);
+      if (!query) return "not_collected";
+      if (query.collectionStatus === "failed") return "failed";
+      return query.isComplete ? "not_observed_in_sample" : "not_collected";
     };
-  }).sort((a, b) => b.assetScore - a.assetScore || (a.bestDownloadRank ?? 9999) - (b.bestDownloadRank ?? 9999));
+    const sortStatus: AssetOpportunity["sortStatus"] = { downloads: statusFor("downloads"), relevance: statusFor("relevance"), recent: statusFor("recent") };
+    const crossSortLabel: AssetOpportunity["crossSortLabel"] = coverage === 3 && evaluatedModes.size === 3 ? "strong_consensus" : coverage >= 2 ? "multi_signal" : coverage === 1 && evaluatedModes.size === 3 ? "single_signal" : "partial_evidence";
+    const evidence: string[] = [];
+    if (bestDownloadRank !== null && bestDownloadRank <= 10) evidence.push("top_download_signal");
+    if (bestRecentRank !== null && bestRecentRank <= 10) evidence.push("fresh_contender");
+    if (crossSortLabel !== "partial_evidence") evidence.push(crossSortLabel);
+    const requested = (mode: SortMode) => queryRows.find((row) => row.sortMode === mode)?.requestedLimit || 100;
+    const downloadScore = rankSignal(bestDownloadRank, requested("downloads"));
+    const relevanceScore = rankSignal(bestRelevanceRank, requested("relevance"));
+    const recentScore = rankSignal(bestRecentRank, requested("recent"));
+    const assetScore = evaluatedModes.size === 3 && downloadScore !== null
+      ? round(downloadScore * 0.55 + (relevanceScore ?? 0) * 0.25 + (recentScore ?? 0) * 0.2)
+      : null;
+    const dates = group.rows.map((row) => row.observedAt);
+    return {
+      assetId: group.first.assetId, externalId: group.first.externalId, title: group.first.title, assetUrl: group.first.assetUrl,
+      thumbnailUrl: group.first.thumbnailUrl, assetType: group.first.assetType, width: group.first.width, height: group.first.height,
+      isPremium: group.first.isPremium, query: group.first.query, appearances: totalAppearances.get(group.first.assetId) ?? group.rows.length,
+      sortModes: [...foundModes], sortCoverage: coverage, evaluatedSortCount: evaluatedModes.size, crossSortLabel, sortStatus, evidence,
+      ranks: { downloads: bestDownloadRank, relevance: bestRelevanceRank, recent: bestRecentRank }, bestDownloadRank, bestRecentRank, bestRelevanceRank,
+      keywordCount: new Set(keywords.filter((row) => row.assetId === group.first.assetId).map((row) => row.normalizedKeyword)).size,
+      assetScore, scoreStatus: assetScore === null ? "insufficient_data" : "scored", firstObservedAt: minDate(dates), lastObservedAt: maxDate(dates)
+    };
+  });
+  const bestByAsset = new Map<string, AssetOpportunity>();
+  for (const item of candidates) {
+    const current = bestByAsset.get(item.assetId);
+    if (!current || (item.assetScore ?? -1) > (current.assetScore ?? -1) || ((item.assetScore ?? -1) === (current.assetScore ?? -1) && (item.bestDownloadRank ?? 9999) < (current.bestDownloadRank ?? 9999))) bestByAsset.set(item.assetId, item);
+  }
+  return [...bestByAsset.values()].sort((a, b) => (b.assetScore ?? -1) - (a.assetScore ?? -1) || (a.bestDownloadRank ?? 9999) - (b.bestDownloadRank ?? 9999));
 }
 
 export async function getResearchInsights(runId: string, limit = 20) {
   const run = await getResearchRun(runId);
   if (!run) return null;
-
   const data = await loadResearchData(runId);
-  const keywordOpportunities = buildKeywordOpportunities(data.suggestions, data.keywords, data.observations);
-  const assetOpportunities = buildAssetOpportunities(data.observations, data.keywords);
-  const downloadAssets = new Set(
-    data.observations.filter((observation) => observation.sortMode === "downloads").map((observation) => observation.assetId)
-  );
-  const assetsWithKeywords = new Set(data.keywords.map((keyword) => keyword.assetId));
-  const uniqueQueries = new Set(data.observations.map((observation) => `${observation.query}\u001f${observation.sortMode}`));
-  const expectedQueries = run.progressTotal || data.suggestions.length * 3;
-  const resultCountsAvailable = new Set(
-    data.observations.filter((observation) => observation.resultCount !== null).map((observation) => `${observation.query}\u001f${observation.sortMode}`)
-  ).size;
-  const queryCoveragePct = expectedQueries ? round(clamp((uniqueQueries.size / expectedQueries) * 100)) : 0;
+  const keywordOpportunities = buildKeywordOpportunities(run.seedKeyword, data.suggestions, data.keywords, data.queries, data.observations);
+  const assetOpportunities = buildAssetOpportunities(data.queries, data.observations, data.keywords);
+  const completedQueries = data.queries.filter((row) => row.isComplete && row.collectionStatus === "completed");
+  const downloadAssets = new Set(data.observations.filter((row) => row.sortMode === "downloads").map((row) => row.assetId));
+  const assetsWithKeywords = new Set(data.keywords.map((row) => row.assetId));
+  const expectedQueries = run.progressTotal || data.suggestions.length * (run.mode === "fast" ? 1 : 3);
+  const queryCoveragePct = expectedQueries ? round(clamp((completedQueries.length / expectedQueries) * 100)) : 0;
   const keywordCoveragePct = downloadAssets.size ? round((assetsWithKeywords.size / downloadAssets.size) * 100) : 0;
-  const completenessScore = round(
-    queryCoveragePct * 0.55 +
-      keywordCoveragePct * 0.25 +
-      (expectedQueries ? clamp((resultCountsAvailable / expectedQueries) * 100) : 0) * 0.2
-  );
-  const confidence: ResearchSummary["dataQuality"]["confidence"] =
-    completenessScore >= 85 && expectedQueries >= 9 ? "high" : completenessScore >= 60 ? "medium" : "low";
+  const resultCountsAvailable = completedQueries.filter((row) => row.resultCount !== null).length;
+  const completenessScore = round(queryCoveragePct * 0.55 + keywordCoveragePct * 0.25 + (expectedQueries ? clamp((resultCountsAvailable / expectedQueries) * 100) : 0) * 0.2);
+  const confidence: Confidence = completenessScore >= 85 && expectedQueries >= 9 ? "high" : completenessScore >= 60 ? "medium" : "low";
   const warnings: string[] = [];
-  if (queryCoveragePct < 100) warnings.push("Sebagian query belum selesai diproses.");
-  if (keywordCoveragePct < 80) warnings.push("Keyword detail belum tersedia untuk sebagian besar aset Downloads.");
-  if (resultCountsAvailable < expectedQueries) warnings.push("Sebagian query tidak memiliki result count.");
-  const topForScore = keywordOpportunities.slice(0, 10);
-  const scoreAverage = (key: keyof Pick<KeywordOpportunity, "demandScore" | "competitionScore" | "freshnessScore" | "consistencyScore" | "opportunityScore">) =>
-    topForScore.length ? round(topForScore.reduce((sum, item) => sum + item[key], 0) / topForScore.length) : 0;
-
-  const summary: ResearchSummary = {
-    runId,
-    scoringVersion: SCORING_VERSION,
-    generatedAt: new Date().toISOString(),
-    totals: {
-      suggestions: data.suggestions.length,
-      queries: uniqueQueries.size,
-      expectedQueries,
-      uniqueAssets: new Set(data.observations.map((observation) => observation.assetId)).size,
-      keywords: data.keywords.length
-    },
-    dataQuality: {
-      queryCoveragePct,
-      keywordCoveragePct,
-      completenessScore,
-      confidence,
-      warnings,
-      downloadsAssets: downloadAssets.size,
-      assetsWithKeywords: [...assetsWithKeywords].filter((assetId) => downloadAssets.has(assetId)).length,
-      missingKeywordAssets: [...downloadAssets].filter((assetId) => !assetsWithKeywords.has(assetId)).length,
-      resultCountsAvailable
-    },
-    scores: {
-      demandScore: scoreAverage("demandScore"),
-      competitionScore: scoreAverage("competitionScore"),
-      freshnessScore: scoreAverage("freshnessScore"),
-      consistencyScore: scoreAverage("consistencyScore"),
-      opportunityScore: scoreAverage("opportunityScore")
-    },
-    topKeywords: keywordOpportunities.slice(0, Math.min(Math.max(limit, 1), 500)),
-    topAssets: assetOpportunities.slice(0, Math.min(Math.max(limit, 1), 500))
-  };
-
-  return summary;
+  if (queryCoveragePct < 100) warnings.push("Sebagian query belum selesai atau gagal diproses.");
+  if (keywordCoveragePct < 80) warnings.push("Keyword detail belum tersedia untuk sebagian besar asset Downloads.");
+  if (resultCountsAvailable < completedQueries.length) warnings.push("Sebagian query tidak memiliki result count yang dapat dibaca.");
+  if (run.mode === "fast") warnings.push("Mode Fast hanya mengamati Downloads; cross-sort dan score penuh belum tersedia.");
+  const dates = [...data.queries.map((row) => row.observedAt), ...data.observations.map((row) => row.observedAt)];
+  const firstObservedAt = minDate(dates), lastObservedAt = maxDate(dates), age = dataAgeStatus(firstObservedAt);
+  const scoredKeywords = keywordOpportunities.filter((item) => item.score !== null && !item.isSeed);
+  return {
+    runId, scoringVersion: SCORING_VERSION, generatedAt: new Date().toISOString(),
+    dataAge: { firstObservedAt, lastObservedAt, dataAgeDays: age.ageDays, status: age.status, refreshRecommended: age.refreshRecommended },
+    totals: { suggestions: data.suggestions.length, queries: completedQueries.length, expectedQueries, uniqueAssets: new Set(data.observations.map((row) => row.assetId)).size, keywords: data.keywords.length, scoredKeywords: scoredKeywords.length },
+    dataQuality: { queryCoveragePct, keywordCoveragePct, completenessScore, confidence, warnings, downloadsAssets: downloadAssets.size, assetsWithKeywords: [...assetsWithKeywords].filter((id) => downloadAssets.has(id)).length, missingKeywordAssets: [...downloadAssets].filter((id) => !assetsWithKeywords.has(id)).length, resultCountsAvailable },
+    scores: { demandScore: averageNullable(scoredKeywords.map((item) => item.downloadSignalScore)), competitionScore: averageNullable(scoredKeywords.map((item) => item.lowCompetitionScore)), freshnessScore: averageNullable(scoredKeywords.map((item) => item.freshnessSignalScore)), consistencyScore: averageNullable(scoredKeywords.map((item) => item.crossSortScore)), opportunityScore: averageNullable(scoredKeywords.map((item) => item.score)) },
+    topKeywords: keywordOpportunities.slice(0, Math.min(Math.max(limit, 1), 500)), topAssets: assetOpportunities.slice(0, Math.min(Math.max(limit, 1), 500))
+  } satisfies ResearchSummary;
 }
 
-export async function getKeywordOpportunities(runId: string, limit = 50) {
-  const insights = await getResearchInsights(runId, limit);
-  return insights?.topKeywords ?? null;
-}
-
-export async function getTopAssets(runId: string, limit = 50) {
-  const insights = await getResearchInsights(runId, limit);
-  return insights?.topAssets ?? null;
-}
-
+export async function getKeywordOpportunities(runId: string, limit = 50) { return (await getResearchInsights(runId, limit))?.topKeywords ?? null; }
+export async function getTopAssets(runId: string, limit = 50) { return (await getResearchInsights(runId, limit))?.topAssets ?? null; }
 export async function getAiContext(runId: string) {
   const insights = await getResearchInsights(runId, 20);
   if (!insights) return null;
   const run = await getResearchRun(runId);
-
-  return {
-    schemaVersion: "1.0",
-    scoringVersion: insights.scoringVersion,
-    run: {
-      id: insights.runId,
-      seedKeyword: run?.seedKeyword,
-      assetType: run?.assetType,
-      locale: run?.locale
-    },
-    dataQuality: insights.dataQuality,
-    scores: insights.scores,
-    topKeywords: insights.topKeywords,
-    topAssets: insights.topAssets,
-    instructions: "Gunakan data sebagai sinyal peluang, bukan jaminan jumlah download aktual."
-  };
+  return { schemaVersion: "2.0", scoringVersion: insights.scoringVersion, run: { id: insights.runId, seedKeyword: run?.seedKeyword, assetType: run?.assetType, locale: run?.locale }, dataAge: insights.dataAge, dataQuality: insights.dataQuality, scores: insights.scores, topKeywords: insights.topKeywords, topAssets: insights.topAssets, instructions: "Gunakan data sebagai sinyal observasi. Jangan mengklaim jumlah download, upload date, atau jaminan penjualan. Keyword tanpa pencarian langsung belum memiliki score pasar." };
 }

@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import {
   assetOpportunitySnapshots,
   assets,
@@ -8,10 +8,13 @@ import {
 import { getDatabase } from "../db/client";
 import {
   getResearchInsights,
+  SCORING_VERSION,
   type AssetOpportunity,
   type KeywordOpportunity
 } from "./insights.service";
 import { getResearchRun, makeStableId } from "./research.service";
+import { researchScopeCondition } from "./research.service";
+import type { AuthContext } from "../auth";
 
 const SNAPSHOT_KEYWORD_LIMIT = 500;
 let backfillPromise: Promise<void> | null = null;
@@ -47,11 +50,15 @@ export async function persistResearchSnapshots(researchRunId: string) {
     averageDownloadRank: item.averageDownloadRank,
     bestRecentRank: item.bestRecentRank,
     resultCount: item.resultCount,
-    demandScore: item.demandScore,
-    competitionScore: item.competitionScore,
-    freshnessScore: item.freshnessScore,
-    consistencyScore: item.consistencyScore,
-    opportunityScore: item.opportunityScore
+    demandScore: item.downloadSignalScore ?? 0,
+    competitionScore: item.lowCompetitionScore ?? 0,
+    freshnessScore: item.freshnessSignalScore ?? 0,
+    consistencyScore: item.crossSortScore ?? 0,
+    opportunityScore: item.opportunityScore ?? 0,
+    scoringVersion: SCORING_VERSION,
+    scoreStatus: item.scoreStatus,
+    rankLevel: item.level,
+    observedAt: item.lastObservedAt ?? new Date()
   }));
   const assetRows = insights.topAssets.map((item: AssetOpportunity) => ({
     id: makeStableId("asset-snapshot", researchRunId, item.assetId),
@@ -62,14 +69,38 @@ export async function persistResearchSnapshots(researchRunId: string) {
     bestRecentRank: item.bestRecentRank,
     bestRelevanceRank: item.bestRelevanceRank,
     keywordCount: item.keywordCount,
-    assetScore: item.assetScore
+    assetScore: item.assetScore ?? 0,
+    scoringVersion: SCORING_VERSION,
+    scoreStatus: item.scoreStatus,
+    observedAt: item.lastObservedAt ?? new Date()
   }));
 
   for (const rows of chunk(keywordRows, 100)) {
-    await database.insert(keywordOpportunitySnapshots).values(rows).onConflictDoNothing();
+    await database.insert(keywordOpportunitySnapshots).values(rows).onConflictDoUpdate({
+      target: keywordOpportunitySnapshots.id,
+      set: {
+        displayKeyword: sql`excluded.display_keyword`, source: sql`excluded.source`,
+        autocompletePosition: sql`excluded.autocomplete_position`, suggestionFrequency: sql`excluded.suggestion_frequency`,
+        queryCount: sql`excluded.query_count`, assetCount: sql`excluded.asset_count`,
+        bestDownloadRank: sql`excluded.best_download_rank`, averageDownloadRank: sql`excluded.average_download_rank`,
+        bestRecentRank: sql`excluded.best_recent_rank`, resultCount: sql`excluded.result_count`,
+        demandScore: sql`excluded.demand_score`, competitionScore: sql`excluded.competition_score`,
+        freshnessScore: sql`excluded.freshness_score`, consistencyScore: sql`excluded.consistency_score`,
+        opportunityScore: sql`excluded.opportunity_score`, scoringVersion: sql`excluded.scoring_version`,
+        scoreStatus: sql`excluded.score_status`, rankLevel: sql`excluded.rank_level`, observedAt: sql`excluded.observed_at`
+      }
+    });
   }
   for (const rows of chunk(assetRows, 100)) {
-    await database.insert(assetOpportunitySnapshots).values(rows).onConflictDoNothing();
+    await database.insert(assetOpportunitySnapshots).values(rows).onConflictDoUpdate({
+      target: assetOpportunitySnapshots.id,
+      set: {
+        appearances: sql`excluded.appearances`, bestDownloadRank: sql`excluded.best_download_rank`,
+        bestRecentRank: sql`excluded.best_recent_rank`, bestRelevanceRank: sql`excluded.best_relevance_rank`,
+        keywordCount: sql`excluded.keyword_count`, assetScore: sql`excluded.asset_score`,
+        scoringVersion: sql`excluded.scoring_version`, scoreStatus: sql`excluded.score_status`, observedAt: sql`excluded.observed_at`
+      }
+    });
   }
 
   return { keywords: keywordRows.length, assets: assetRows.length };
@@ -86,9 +117,12 @@ async function ensureSnapshotBackfill() {
         progressTotal: researchRuns.progressTotal,
         progressCompleted: researchRuns.progressCompleted
       }).from(researchRuns).where(eq(researchRuns.status, "completed")),
-      database.select({ researchRunId: keywordOpportunitySnapshots.researchRunId }).from(keywordOpportunitySnapshots)
+      database.select({
+        researchRunId: keywordOpportunitySnapshots.researchRunId,
+        scoringVersion: keywordOpportunitySnapshots.scoringVersion
+      }).from(keywordOpportunitySnapshots)
     ]);
-    const existingRuns = new Set(existing.map((row) => row.researchRunId));
+    const existingRuns = new Set(existing.filter((row) => row.scoringVersion === SCORING_VERSION).map((row) => row.researchRunId));
     for (const run of runs) {
       if (existingRuns.has(run.id)) continue;
       if (run.progressTotal > 0 && run.progressCompleted < run.progressTotal) continue;
@@ -100,6 +134,21 @@ async function ensureSnapshotBackfill() {
 
 function avg(values: number[]) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function recencyWeight(observedAt: Date, now = Date.now()) {
+  const ageDays = Math.max(0, (now - observedAt.getTime()) / 86_400_000);
+  if (ageDays <= 7) return 1;
+  if (ageDays <= 30) return 0.75;
+  if (ageDays <= 90) return 0.5;
+  return 0.25;
+}
+
+function weightedAverage(items: Array<{ value: number; observedAt: Date }>) {
+  if (!items.length) return null;
+  const weighted = items.reduce((total, item) => total + item.value * recencyWeight(item.observedAt), 0);
+  const weight = items.reduce((total, item) => total + recencyWeight(item.observedAt), 0);
+  return weight ? weighted / weight : null;
 }
 
 function round(value: number | null) {
@@ -115,7 +164,7 @@ export interface GlobalKeywordInsight {
   researchCount: number;
   snapshotCount: number;
   confidence: "low" | "medium" | "high";
-  trend: "up" | "stable" | "down";
+  trend: "up" | "stable" | "down" | "unknown";
   averageOpportunityScore: number | null;
   globalOpportunityScore: number | null;
   averageDemandScore: number | null;
@@ -133,15 +182,39 @@ export interface GlobalKeywordInsight {
 export interface GlobalInsights {
   generatedAt: string;
   filters: { assetType: string; locale: string; category: string };
-  totals: { researchRuns: number; keywords: number; snapshots: number };
+  totals: { researchRuns: number; keywords: number; assets: number; snapshots: number };
   keywords: GlobalKeywordInsight[];
+  assets: GlobalAssetInsight[];
 }
 
-export async function getGlobalInsights(options: { assetType?: string; locale?: string; category?: string; limit?: number } = {}, auth?: unknown) {
+export interface GlobalAssetInsight {
+  assetId: string;
+  externalId: string;
+  title: string;
+  assetUrl: string;
+  thumbnailUrl: string | null;
+  assetType: string;
+  locale: string;
+  category: string;
+  researchCount: number;
+  effectiveObservationCount: number;
+  weightedScore: number | null;
+  confidence: "low" | "medium" | "high";
+  bestDownloadRank: number | null;
+  bestRelevanceRank: number | null;
+  bestRecentRank: number | null;
+  firstObservedAt: Date;
+  lastObservedAt: Date;
+}
+
+export async function getGlobalInsights(options: { assetType?: string; locale?: string; category?: string; limit?: number } = {}, auth?: AuthContext | null) {
   await ensureSnapshotBackfill();
   const database = getDatabase();
-  void auth;
   const conditions = [];
+  conditions.push(eq(keywordOpportunitySnapshots.scoringVersion, SCORING_VERSION));
+  conditions.push(inArray(keywordOpportunitySnapshots.scoreStatus, ["provisional", "scored"]));
+  const scope = researchScopeCondition(auth);
+  if (scope) conditions.push(scope);
   if (options.assetType && options.assetType !== "all") conditions.push(eq(keywordOpportunitySnapshots.assetType, options.assetType));
   if (options.locale && options.locale !== "all") conditions.push(eq(keywordOpportunitySnapshots.locale, options.locale));
   if (options.category && options.category !== "all") conditions.push(eq(keywordOpportunitySnapshots.category, options.category));
@@ -151,25 +224,47 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
     .innerJoin(researchRuns, eq(keywordOpportunitySnapshots.researchRunId, researchRuns.id))
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(desc(keywordOpportunitySnapshots.observedAt));
-  const snapshotRows = rows.map((row) => row.snapshot);
+  const latestPerWindow = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const day = row.snapshot.observedAt.toISOString().slice(0, 10);
+    const key = [row.snapshot.normalizedKeyword, row.snapshot.assetType, row.snapshot.locale, row.snapshot.category, day].join("\u001f");
+    const existing = latestPerWindow.get(key);
+    if (!existing || existing.snapshot.observedAt < row.snapshot.observedAt) latestPerWindow.set(key, row);
+  }
+  const snapshotRows = [...latestPerWindow.values()].map((row) => row.snapshot);
 
   const grouped = new Map<string, typeof snapshotRows>();
   for (const row of snapshotRows) {
-    const current = grouped.get(row.normalizedKeyword) ?? [];
+    const scopeKey = [row.normalizedKeyword, row.assetType, row.locale, row.category].join("\u001f");
+    const current = grouped.get(scopeKey) ?? [];
     current.push(row);
-    grouped.set(row.normalizedKeyword, current);
+    grouped.set(scopeKey, current);
   }
 
-  const keywords = [...grouped.entries()].map(([normalizedKeyword, items]): GlobalKeywordInsight => {
+  const keywords = [...grouped.values()].map((items): GlobalKeywordInsight => {
     const sorted = [...items].sort((a, b) => b.observedAt.getTime() - a.observedAt.getTime());
-    const recent = sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 2)));
-    const older = sorted.slice(Math.max(1, Math.ceil(sorted.length / 2)));
-    const recentScore = avg(recent.map((item) => item.opportunityScore)) ?? 0;
-    const olderScore = avg(older.map((item) => item.opportunityScore));
-    const trend: GlobalKeywordInsight["trend"] = olderScore === null || recentScore > olderScore + 4 ? "up" : recentScore < olderScore - 4 ? "down" : "stable";
+    const normalizedKeyword = sorted[0]?.normalizedKeyword ?? "";
+    const byDay = new Map<string, number[]>();
+    for (const item of sorted) {
+      const day = item.observedAt.toISOString().slice(0, 10);
+      const scores = byDay.get(day) ?? [];
+      scores.push(item.opportunityScore);
+      byDay.set(day, scores);
+    }
+    const dailyScores = [...byDay.entries()]
+      .map(([day, scores]) => ({ day, score: avg(scores) ?? 0 }))
+      .sort((a, b) => b.day.localeCompare(a.day));
+    const latestScore = dailyScores[0]?.score ?? null;
+    const priorScore = dailyScores[1]?.score ?? null;
+    const trend: GlobalKeywordInsight["trend"] = latestScore === null || priorScore === null
+      ? "unknown"
+      : latestScore > priorScore + 4 ? "up" : latestScore < priorScore - 4 ? "down" : "stable";
     const researchIds = new Set(items.map((item) => item.researchRunId));
     const averageOpportunityScore = avg(items.map((item) => item.opportunityScore));
-    const globalOpportunityScore = averageOpportunityScore === null ? null : Math.round(Math.min(100, averageOpportunityScore + Math.min(15, Math.max(0, researchIds.size - 1) * 5)) * 10) / 10;
+    const globalOpportunityScore = round(weightedAverage(items.map((item) => ({ value: item.opportunityScore, observedAt: item.observedAt }))));
+    const observationSpanDays = sorted.length > 1
+      ? Math.floor((sorted[0].observedAt.getTime() - sorted[sorted.length - 1].observedAt.getTime()) / 86_400_000)
+      : 0;
 
     return {
       keyword: sorted[0]?.displayKeyword ?? normalizedKeyword,
@@ -179,7 +274,7 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
       categories: [...new Set(items.map((item) => item.category))],
       researchCount: researchIds.size,
       snapshotCount: items.length,
-      confidence: researchIds.size >= 4 ? "high" : researchIds.size >= 2 ? "medium" : "low",
+      confidence: dailyScores.length >= 4 && observationSpanDays >= 14 ? "high" : dailyScores.length >= 2 ? "medium" : "low",
       trend,
       averageOpportunityScore: round(averageOpportunityScore),
       globalOpportunityScore,
@@ -196,6 +291,62 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
     };
   }).sort((a, b) => (b.globalOpportunityScore ?? 0) - (a.globalOpportunityScore ?? 0) || b.researchCount - a.researchCount);
 
+  const assetConditions = [
+    eq(assetOpportunitySnapshots.scoringVersion, SCORING_VERSION),
+    eq(assetOpportunitySnapshots.scoreStatus, "scored"),
+    gt(assetOpportunitySnapshots.assetScore, 0)
+  ];
+  if (scope) assetConditions.push(scope);
+  if (options.assetType && options.assetType !== "all") assetConditions.push(eq(researchRuns.assetType, options.assetType));
+  if (options.locale && options.locale !== "all") assetConditions.push(eq(researchRuns.locale, options.locale));
+  if (options.category && options.category !== "all") assetConditions.push(eq(researchRuns.category, options.category));
+  const assetRows = await database.select({
+    snapshot: assetOpportunitySnapshots,
+    asset: assets,
+    locale: researchRuns.locale,
+    category: researchRuns.category,
+    runAssetType: researchRuns.assetType
+  }).from(assetOpportunitySnapshots)
+    .innerJoin(assets, eq(assetOpportunitySnapshots.assetId, assets.id))
+    .innerJoin(researchRuns, eq(assetOpportunitySnapshots.researchRunId, researchRuns.id))
+    .where(and(...assetConditions))
+    .orderBy(desc(assetOpportunitySnapshots.observedAt));
+  const effectiveAssets = new Map<string, (typeof assetRows)[number]>();
+  for (const row of assetRows) {
+    const day = row.snapshot.observedAt.toISOString().slice(0, 10);
+    const key = [row.asset.id, row.runAssetType, row.locale, row.category, day].join("\u001f");
+    if (!effectiveAssets.has(key)) effectiveAssets.set(key, row);
+  }
+  const assetsByScope = new Map<string, Array<(typeof assetRows)[number]>>();
+  for (const row of effectiveAssets.values()) {
+    const key = [row.asset.id, row.runAssetType, row.locale, row.category].join("\u001f");
+    const current = assetsByScope.get(key) ?? [];
+    current.push(row); assetsByScope.set(key, current);
+  }
+  const globalAssets = [...assetsByScope.values()].map((items): GlobalAssetInsight => {
+    const sorted = [...items].sort((a, b) => b.snapshot.observedAt.getTime() - a.snapshot.observedAt.getTime());
+    const first = sorted[0];
+    const researchIds = new Set(items.map((item) => item.snapshot.researchRunId));
+    const spanDays = sorted.length > 1 ? Math.floor((sorted[0].snapshot.observedAt.getTime() - sorted[sorted.length - 1].snapshot.observedAt.getTime()) / 86_400_000) : 0;
+    const minimumRank = (values: Array<number | null>) => {
+      const available = values.filter((value): value is number => value !== null);
+      return available.length ? Math.min(...available) : null;
+    };
+    return {
+      assetId: first.asset.id, externalId: first.asset.externalId, title: first.asset.title,
+      assetUrl: first.asset.assetUrl, thumbnailUrl: first.asset.thumbnailUrl, assetType: first.runAssetType,
+      locale: first.locale, category: first.category, researchCount: researchIds.size,
+      effectiveObservationCount: items.length,
+      weightedScore: round(weightedAverage(items.map((item) => ({ value: item.snapshot.assetScore, observedAt: item.snapshot.observedAt })))),
+      confidence: items.length >= 4 && spanDays >= 14 ? "high" : items.length >= 2 ? "medium" : "low",
+      bestDownloadRank: minimumRank(items.map((item) => item.snapshot.bestDownloadRank)),
+      bestRelevanceRank: minimumRank(items.map((item) => item.snapshot.bestRelevanceRank)),
+      bestRecentRank: minimumRank(items.map((item) => item.snapshot.bestRecentRank)),
+      firstObservedAt: sorted[sorted.length - 1].snapshot.observedAt,
+      lastObservedAt: first.snapshot.observedAt
+    };
+  }).sort((a, b) => (b.weightedScore ?? 0) - (a.weightedScore ?? 0) || b.researchCount - a.researchCount);
+
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   return {
     generatedAt: new Date().toISOString(),
@@ -203,16 +354,23 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
     totals: {
       researchRuns: new Set(snapshotRows.map((row) => row.researchRunId)).size,
       keywords: grouped.size,
+      assets: assetsByScope.size,
       snapshots: snapshotRows.length
     },
-    keywords: keywords.slice(0, limit)
+    keywords: keywords.slice(0, limit),
+    assets: globalAssets.slice(0, limit)
   } satisfies GlobalInsights;
 }
 
-export async function getGlobalAiContext(options: { assetType?: string; locale?: string; category?: string } = {}) {
-  const insights = await getGlobalInsights({ ...options, limit: 100 });
+export async function getGlobalAiContext(options: { assetType?: string; locale?: string; category?: string } = {}, auth?: AuthContext | null) {
+  const insights = await getGlobalInsights({ ...options, limit: 100 }, auth);
   const database = getDatabase();
   const conditions = [];
+  conditions.push(eq(assetOpportunitySnapshots.scoringVersion, SCORING_VERSION));
+  conditions.push(eq(assetOpportunitySnapshots.scoreStatus, "scored"));
+  conditions.push(gt(assetOpportunitySnapshots.assetScore, 0));
+  const scope = researchScopeCondition(auth);
+  if (scope) conditions.push(scope);
   if (options.assetType && options.assetType !== "all") conditions.push(eq(researchRuns.assetType, options.assetType));
   if (options.locale && options.locale !== "all") conditions.push(eq(researchRuns.locale, options.locale));
   if (options.category && options.category !== "all") conditions.push(eq(researchRuns.category, options.category));

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, type SQL } from "drizzle-orm";
 import {
   assetObservations,
   assetKeywords,
@@ -30,6 +30,13 @@ export interface CreateResearchInput {
   assetsPerQuery: number;
   autocompleteEnabled: boolean;
   mode: ResearchMode;
+}
+
+export function researchScopeCondition(auth?: AuthContext | null): SQL | undefined {
+  if (!auth || auth.isDevBypass) return undefined;
+  return auth.organizationId
+    ? eq(researchRuns.organizationId, auth.organizationId)
+    : eq(researchRuns.ownerClerkUserId, auth.userId);
 }
 
 function stableId(...parts: string[]): string {
@@ -70,21 +77,22 @@ export async function createResearchRun(input: CreateResearchInput) {
 
 export async function listResearchRuns(limit = 20, auth?: AuthContext | null) {
   const database = getDatabase();
-  void auth;
+  const scope = researchScopeCondition(auth);
   return database
     .select()
     .from(researchRuns)
+    .where(scope)
     .orderBy(desc(researchRuns.createdAt))
     .limit(Math.min(Math.max(limit, 1), 100));
 }
 
 export async function getResearchRun(id: string, auth?: AuthContext | null) {
   const database = getDatabase();
-  void auth;
+  const scope = researchScopeCondition(auth);
   const rows = await database
     .select()
     .from(researchRuns)
-    .where(eq(researchRuns.id, id))
+    .where(scope ? and(eq(researchRuns.id, id), scope) : eq(researchRuns.id, id))
     .limit(1);
 
   return rows[0] ?? null;

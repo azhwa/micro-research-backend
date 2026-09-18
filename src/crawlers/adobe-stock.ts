@@ -22,6 +22,7 @@ import {
   selectProxyForResearch
 } from "../services/proxy.service";
 import { env } from "../config/env";
+import { normalizeKeyword, parseAdobeResultCount, type ResultCountQualifier } from "../services/research-metrics";
 
 type SortMode = "downloads" | "relevance" | "recent";
 
@@ -518,7 +519,7 @@ async function collectSuggestions(
     `${seed} `,
     ...Array.from({ length: 26 }, (_, index) => `${seed} ${String.fromCharCode(97 + index)}`)
   ].slice(0, maxPrefixes);
-  const collected: Array<{ baseKeyword: string; suggestion: string; position: number }> = [];
+  const collected: Array<{ baseKeyword: string; suggestion: string; position: number; prefix: string | null }> = [];
   const seen = new Set<string>();
   let source: "adobe_autocomplete" | "seed_fallback" = "adobe_autocomplete";
   let emptyPanelStreak = 0;
@@ -625,7 +626,8 @@ async function collectSuggestions(
             collected.push({
               baseKeyword: seed,
               suggestion,
-              position: suggestionIndex + 1
+              position: suggestionIndex + 1,
+              prefix
             });
           }
         });
@@ -648,7 +650,7 @@ async function collectSuggestions(
 
   if (collected.length === 0) {
     source = "seed_fallback";
-    collected.push({ baseKeyword: seed, suggestion: seed, position: 1 });
+    collected.push({ baseKeyword: seed, suggestion: seed, position: 1, prefix: null });
     await appendResearchEvent(
       researchRunId,
       "info",
@@ -757,10 +759,6 @@ async function collectSearchResults(
 
   const result = await page.evaluate((maxAssets) => {
     const body = document.body?.innerText ?? "";
-    const resultMatch = body.match(/([\d,.]+)\s+results?\s+for\b/i);
-    const resultCount = resultMatch
-      ? Number(resultMatch[1].replace(/[^0-9]/g, ""))
-      : null;
 
     const nodes = Array.from(document.querySelectorAll("[data-content-id]"));
     const seen = new Set<string>();
@@ -802,11 +800,15 @@ async function collectSearchResults(
       if (items.length >= maxAssets) break;
     }
 
-    return { resultCount, items };
+    return { body, items };
   }, limit);
 
+  const parsedResultCount = parseAdobeResultCount(result.body);
+
   return {
-    resultCount: result.resultCount,
+    resultCount: parsedResultCount.value,
+    resultCountRaw: parsedResultCount.raw,
+    resultCountQualifier: parsedResultCount.qualifier,
     assets: result.items.map((item) => ({
       externalId: String(item.externalId),
       title: String(item.title),
@@ -822,8 +824,9 @@ async function collectSearchResults(
 
 async function persistSuggestions(
   researchRunId: string,
-  rows: Array<{ baseKeyword: string; suggestion: string; position: number }>,
-  locale: string
+  rows: Array<{ baseKeyword: string; suggestion: string; position: number; prefix?: string | null }>,
+  locale: string,
+  source: "adobe_autocomplete" | "seed_fallback"
 ) {
   const database = getDatabase();
   const values = rows.map((row) => ({
@@ -832,7 +835,9 @@ async function persistSuggestions(
     baseKeyword: row.baseKeyword,
     suggestion: row.suggestion,
     position: row.position,
-    source: "autocomplete",
+    source,
+    isSeed: normalizeKeyword(row.suggestion) === normalizeKeyword(row.baseKeyword),
+    autocompletePrefix: row.prefix ?? null,
     locale
   }));
 
@@ -848,6 +853,9 @@ async function persistSearch(
   sortMode: SortMode,
   locale: string,
   resultCount: number | null,
+  resultCountRaw: string | null,
+  resultCountQualifier: ResultCountQualifier,
+  requestedLimit: number,
   collectedAssets: CollectedAsset[]
 ) {
   const database = getDatabase();
@@ -863,6 +871,11 @@ async function persistSearch(
       sortMode,
       page: 1,
       resultCount,
+      resultCountRaw,
+      resultCountQualifier,
+      requestedLimit,
+      collectedCount: collectedAssets.length,
+      collectionStatus: "completed",
       isComplete: false,
       locale
     })
@@ -873,7 +886,16 @@ async function persistSearch(
         searchQueries.sortMode,
         searchQueries.page
       ],
-      set: { resultCount, isComplete: false, observedAt: new Date() }
+      set: {
+        resultCount,
+        resultCountRaw,
+        resultCountQualifier,
+        requestedLimit,
+        collectedCount: collectedAssets.length,
+        collectionStatus: "completed",
+        isComplete: false,
+        observedAt: new Date()
+      }
     });
 
   const assetValues = collectedAssets.map((item) => {
@@ -931,6 +953,46 @@ async function persistSearch(
     .where(eq(searchQueries.id, queryId));
 }
 
+async function persistFailedSearch(
+  researchRunId: string,
+  query: string,
+  assetType: string,
+  sortMode: SortMode,
+  locale: string,
+  requestedLimit: number
+) {
+  const database = getDatabase();
+  const queryId = makeStableId("query", researchRunId, query, sortMode, "1");
+  await database.insert(searchQueries).values({
+    id: queryId,
+    researchRunId,
+    query,
+    assetType,
+    sortMode,
+    page: 1,
+    resultCount: null,
+    resultCountRaw: null,
+    resultCountQualifier: "unknown",
+    requestedLimit,
+    collectedCount: 0,
+    collectionStatus: "failed",
+    isComplete: false,
+    locale
+  }).onConflictDoUpdate({
+    target: [searchQueries.researchRunId, searchQueries.query, searchQueries.sortMode, searchQueries.page],
+    set: {
+      resultCount: null,
+      resultCountRaw: null,
+      resultCountQualifier: "unknown",
+      requestedLimit,
+      collectedCount: 0,
+      collectionStatus: "failed",
+      isComplete: false,
+      observedAt: new Date()
+    }
+  });
+}
+
 async function collectAndPersistAssetKeywords(
   page: Page,
   researchRunId: string,
@@ -975,7 +1037,7 @@ async function collectAndPersistAssetKeywords(
     );
 
     const keywordValues = keywordRows.map((row) => {
-      const normalizedKeyword = row.keyword.toLowerCase().replace(/\s+/g, " ");
+      const normalizedKeyword = normalizeKeyword(row.keyword);
       return {
         id: makeStableId(
           "asset-keyword",
@@ -1243,7 +1305,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         );
       } else {
         suggestionResult = {
-          rows: [{ baseKeyword: run.seedKeyword, suggestion: run.seedKeyword, position: 1 }],
+          rows: [{ baseKeyword: run.seedKeyword, suggestion: run.seedKeyword, position: 1, prefix: null }],
           source: "seed_fallback"
         };
         await appendResearchEvent(
@@ -1262,7 +1324,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         );
       }
       const suggestionRows = suggestionResult.rows;
-      await persistSuggestions(researchRunId, suggestionRows, run.locale);
+      await persistSuggestions(researchRunId, suggestionRows, run.locale, suggestionResult.source);
       await appendResearchEvent(
         researchRunId,
         suggestionResult.source === "adobe_autocomplete" ? "success" : "info",
@@ -1338,23 +1400,40 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             { query: suggestion.suggestion, sortMode }
           );
 
-          const searchResult = await withRetry(
+          let searchResult;
+          try {
+            searchResult = await withRetry(
+              researchRunId,
+              `Query ${sortMode} â€œ${suggestion.suggestion}â€`,
+              () => collectSearchResults(
+                page,
+                suggestion.suggestion,
+                run.assetType,
+                run.locale,
+                sortMode,
+                run.assetsPerQuery,
+                navigationTimeout,
+                selectorTimeout
+              ),
+              2,
+              () => getPageDiagnostics(page)
+            );
+          } catch (error) {
+            await persistFailedSearch(researchRunId, suggestion.suggestion, run.assetType, sortMode, run.locale, run.assetsPerQuery);
+            throw error;
+          }
+          await persistSearch(
             researchRunId,
-            `Query ${sortMode} â€œ${suggestion.suggestion}â€`,
-            () => collectSearchResults(
-              page,
-              suggestion.suggestion,
-              run.assetType,
-              run.locale,
-              sortMode,
-              run.assetsPerQuery,
-              navigationTimeout,
-              selectorTimeout
-            ),
-            2,
-            () => getPageDiagnostics(page)
+            suggestion.suggestion,
+            run.assetType,
+            sortMode,
+            run.locale,
+            searchResult.resultCount,
+            searchResult.resultCountRaw,
+            searchResult.resultCountQualifier,
+            run.assetsPerQuery,
+            searchResult.assets
           );
-          await persistSearch(researchRunId, suggestion.suggestion, run.assetType, sortMode, run.locale, searchResult.resultCount, searchResult.assets);
           resumeState.completedKeys.add(queryKey);
 
           completed += 1;

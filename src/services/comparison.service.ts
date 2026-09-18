@@ -5,6 +5,14 @@ function round(value: number) {
   return Math.round(value * 10) / 10;
 }
 
+function metric(first: number | null, second: number | null) {
+  return {
+    first,
+    second,
+    delta: first === null || second === null ? null : round(second - first)
+  };
+}
+
 export async function compareResearchRuns(firstRunId: string, secondRunId: string, limit = 100) {
   const [firstRun, secondRun, firstInsights, secondInsights] = await Promise.all([
     getResearchRun(firstRunId),
@@ -42,7 +50,6 @@ export async function compareResearchRuns(firstRunId: string, secondRunId: strin
   const overlap = [...firstAssetIds].filter((assetId) => secondAssetIds.has(assetId)).length;
   const union = new Set([...firstAssetIds, ...secondAssetIds]).size;
 
-  const metric = (first: number, second: number) => ({ first, second, delta: round(second - first) });
   return {
     generatedAt: new Date().toISOString(),
     firstRun: { id: firstRun.id, seedKeyword: firstRun.seedKeyword, category: firstRun.category, assetType: firstRun.assetType, locale: firstRun.locale, status: firstRun.status },
