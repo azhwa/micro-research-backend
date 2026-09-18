@@ -275,6 +275,33 @@ async function waitForAdobeSearchInput(page: Page, timeoutMs = ADOBE_CHALLENGE_W
     .catch(() => false);
 }
 
+async function ensureAdobeSearchPage(
+  page: Page,
+  assetType: string,
+  locale: string,
+  navigationTimeout: number
+) {
+  const targetUrl = new URL(searchPageUrl(assetType, locale));
+  const currentUrl = new URL(page.url());
+  const alreadyOnSearchPage = currentUrl.origin === targetUrl.origin
+    && currentUrl.pathname === targetUrl.pathname;
+  let httpStatus: number | null = null;
+
+  // PlaywrightCrawler has already navigated to the start URL before calling
+  // requestHandler. Reusing that page is important: navigating to the clean
+  // URL again resets Adobe's short-lived challenge before it can complete.
+  if (!alreadyOnSearchPage) {
+    const response = await page.goto(targetUrl.toString(), {
+      waitUntil: "domcontentloaded",
+      timeout: navigationTimeout
+    });
+    httpStatus = response?.status() ?? null;
+  }
+
+  const searchInputReady = await waitForAdobeSearchInput(page);
+  return { httpStatus, searchInputReady };
+}
+
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
   const title = await page.title().catch(() => "");
@@ -607,14 +634,13 @@ async function collectSearchResults(
   // sort option from Adobe's own dropdown. Sending `order=nb_downloads`
   // directly in the first URL can be treated differently by Adobe's bot
   // protection and does not always match the UI state.
-  const response = await page.goto(searchPageUrl(assetType, locale), {
-    waitUntil: "domcontentloaded",
-    timeout: navigationTimeout
-  });
-  const httpStatus = response?.status() ?? null;
-
+  const { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
+    page,
+    assetType,
+    locale,
+    navigationTimeout
+  );
   const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
-  const searchInputReady = await waitForAdobeSearchInput(page);
   if (!searchInputReady) {
     const diagnostics = await getPageDiagnostics(page, httpStatus);
     throw new CrawlerStageError(
@@ -1132,12 +1158,12 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         // Autocomplete must start from the clean Adobe search page. The
         // extension does not open a query URL first; it types into this page
         // and reads the resulting DOM panel.
-        const response = await page.goto(searchPageUrl(run.assetType, run.locale), {
-          waitUntil: "domcontentloaded",
-          timeout: navigationTimeout
-        });
-        const httpStatus = response?.status() ?? null;
-        const searchInputReady = await waitForAdobeSearchInput(page);
+        const { httpStatus, searchInputReady } = await ensureAdobeSearchPage(
+          page,
+          run.assetType,
+          run.locale,
+          navigationTimeout
+        );
         const diagnostics = await getPageDiagnostics(page, httpStatus);
         if (!searchInputReady || diagnostics.botDetected) {
           await appendResearchEvent(
