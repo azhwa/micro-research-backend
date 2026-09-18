@@ -207,19 +207,6 @@ function searchPageUrl(assetType: string, locale?: string): string {
   return new URL(searchPath(assetType, locale), "https://stock.adobe.com").toString();
 }
 
-function searchUrl(query: string, assetType: string, sortMode?: SortMode, locale?: string): string {
-  const url = new URL(searchPath(assetType, locale), "https://stock.adobe.com");
-  url.searchParams.set("k", query);
-  url.searchParams.set("limit", "100");
-  url.searchParams.set("search_page", "1");
-  url.searchParams.set("search_type", "usertyped");
-
-  if (sortMode === "downloads") url.searchParams.set("order", "nb_downloads");
-  if (sortMode === "recent") url.searchParams.set("order", "creation");
-
-  return url.toString();
-}
-
 function numberOrNull(value: string | null | undefined): number | null {
   if (!value) return null;
   const parsed = Number(value.replace(/[^0-9.-]/g, ""));
@@ -268,6 +255,13 @@ const AUTOCOMPLETE_PANEL_SELECTOR =
   '.js-search-autocomplete-panel, [role="listbox"], [data-t="search-autocomplete"]';
 const AUTOCOMPLETE_ITEM_SELECTOR =
   '.js-search-autocomplete-panel li, [role="listbox"] [role="option"], [data-t="search-autocomplete"] li';
+const SORT_SELECT_SELECTOR = 'select[data-t="search-sort-menu"]';
+
+function adobeSortValue(sortMode: SortMode): string {
+  if (sortMode === "downloads") return "nb_downloads";
+  if (sortMode === "recent") return "creation";
+  return "relevance";
+}
 
 async function getPageDiagnostics(page: Page, httpStatus: number | null = null): Promise<PageDiagnostics> {
   const url = page.url();
@@ -596,11 +590,50 @@ async function collectSearchResults(
   navigationTimeout: number,
   selectorTimeout: number
 ) {
-  const response = await page.goto(searchUrl(query, assetType, sortMode, locale), {
+  // Use the same browser flow as a real user: open the clean search page,
+  // type the keyword into Adobe's search input, submit it, then choose the
+  // sort option from Adobe's own dropdown. Sending `order=nb_downloads`
+  // directly in the first URL can be treated differently by Adobe's bot
+  // protection and does not always match the UI state.
+  const response = await page.goto(searchPageUrl(assetType, locale), {
     waitUntil: "domcontentloaded",
     timeout: navigationTimeout
   });
   const httpStatus = response?.status() ?? null;
+
+  const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
+  try {
+    await input.waitFor({ state: "visible", timeout: Math.min(selectorTimeout, 10_000) });
+    await input.fill(query);
+    await input.press("Enter");
+    await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+  } catch (error) {
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
+    throw new CrawlerStageError(
+      `Input pencarian Adobe tidak dapat digunakan pada ${diagnostics.url}: ${errorMessage(error)}`,
+      classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
+    );
+  }
+
+  const sortSelect = page.locator(SORT_SELECT_SELECTOR).first();
+  const sortValue = adobeSortValue(sortMode);
+  try {
+    await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, 10_000) });
+    await sortSelect.selectOption(sortValue);
+    await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+    await page.waitForTimeout(500);
+
+    const selectedSortValue = await sortSelect.inputValue();
+    if (selectedSortValue !== sortValue) {
+      throw new Error(`Adobe memilih sort '${selectedSortValue}', expected '${sortValue}'`);
+    }
+  } catch (error) {
+    const diagnostics = await getPageDiagnostics(page, httpStatus);
+    throw new CrawlerStageError(
+      `Dropdown sort Adobe tidak dapat dipilih (${sortValue}) pada ${diagnostics.url}: ${errorMessage(error)}`,
+      classifyFailure(error, diagnostics) === "timeout" ? "selector_timeout" : "navigation_error"
+    );
+  }
 
   const resultSelector = 'a.js-search-result-thumbnail[data-content-id], div[data-content-id]';
   // Fast mode reduces query count, but headed Chromium on the VPS can still
@@ -1342,7 +1375,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       }
     });
 
-    const startUrl = searchUrl(run.seedKeyword, run.assetType, undefined, run.locale);
+    // Start from Adobe's clean search page. The request handler performs the
+    // keyword entry and sort selection through the page UI.
+    const startUrl = searchPageUrl(run.assetType, run.locale);
     try {
       await crawler.run([
         {
