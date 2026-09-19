@@ -7,7 +7,7 @@ import { dataAgeStatus, lowCompetitionScore, normalizeKeyword, rankSignal, type 
 type SortMode = "downloads" | "relevance" | "recent";
 type Confidence = "low" | "medium" | "high";
 type ScoreStatus = "scored" | "provisional" | "discovery" | "insufficient_data" | "not_directly_researched";
-type KeywordLevel = 0 | 1 | 2 | 3 | 4 | 5;
+export type KeywordLevel = 0 | 1 | 2 | 3 | 4 | 5;
 export const SCORING_VERSION = "candidate-v2";
 
 interface SuggestionRow { suggestion: string; position: number; source: string; isSeed: boolean; autocompletePrefix: string | null; observedAt: Date }
@@ -62,7 +62,7 @@ const averageNullable = (values: Array<number | null>) => {
 const minDate = (values: Date[]) => values.length ? new Date(Math.min(...values.map((value) => value.getTime()))) : null;
 const maxDate = (values: Date[]) => values.length ? new Date(Math.max(...values.map((value) => value.getTime()))) : null;
 
-function keywordLevel(score: number | null): { level: KeywordLevel; label: string; indicator: string } {
+export function keywordLevel(score: number | null): { level: KeywordLevel; label: string; indicator: string } {
   if (score === null) return { level: 0, label: "Data belum cukup", indicator: "outline" };
   if (score < 20) return { level: 1, label: "Weak", indicator: "gray" };
   if (score < 40) return { level: 2, label: "Low", indicator: "amber" };

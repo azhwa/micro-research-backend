@@ -17,9 +17,12 @@ export async function insightsRoutes(app: FastifyInstance): Promise<void> {
       limit: 200
     }, request.auth);
     const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-    const header = ["keyword", "global_opportunity_score", "average_opportunity_score", "confidence", "trend", "research_count", "average_download_rank", "average_result_count", "asset_count", "asset_types", "locales", "sources"];
+    const header = ["global_rank", "keyword", "global_level", "global_label", "global_opportunity_score", "average_opportunity_score", "confidence", "trend", "research_count", "average_download_rank", "average_result_count", "asset_count", "asset_types", "locales", "sources"];
     const rows = result.keywords.map((item) => [
+      item.globalRank,
       item.keyword,
+      item.level,
+      item.label,
       item.globalOpportunityScore,
       item.averageOpportunityScore,
       item.confidence,

@@ -9,6 +9,8 @@ import { getDatabase } from "../db/client";
 import {
   getResearchInsights,
   SCORING_VERSION,
+  keywordLevel,
+  type KeywordLevel,
   type AssetOpportunity,
   type KeywordOpportunity
 } from "./insights.service";
@@ -164,6 +166,10 @@ export interface GlobalKeywordInsight {
   researchCount: number;
   snapshotCount: number;
   confidence: "low" | "medium" | "high";
+  globalRank: number | null;
+  level: KeywordLevel;
+  label: string;
+  indicator: string;
   trend: "up" | "stable" | "down" | "unknown";
   averageOpportunityScore: number | null;
   globalOpportunityScore: number | null;
@@ -262,6 +268,7 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
     const researchIds = new Set(items.map((item) => item.researchRunId));
     const averageOpportunityScore = avg(items.map((item) => item.opportunityScore));
     const globalOpportunityScore = round(weightedAverage(items.map((item) => ({ value: item.opportunityScore, observedAt: item.observedAt }))));
+    const level = keywordLevel(globalOpportunityScore);
     const observationSpanDays = sorted.length > 1
       ? Math.floor((sorted[0].observedAt.getTime() - sorted[sorted.length - 1].observedAt.getTime()) / 86_400_000)
       : 0;
@@ -275,6 +282,10 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
       researchCount: researchIds.size,
       snapshotCount: items.length,
       confidence: dailyScores.length >= 4 && observationSpanDays >= 14 ? "high" : dailyScores.length >= 2 ? "medium" : "low",
+      globalRank: null,
+      level: level.level,
+      label: level.label,
+      indicator: level.indicator,
       trend,
       averageOpportunityScore: round(averageOpportunityScore),
       globalOpportunityScore,
@@ -290,6 +301,11 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
       lastObservedAt: sorted[0]?.observedAt ?? new Date()
     };
   }).sort((a, b) => (b.globalOpportunityScore ?? 0) - (a.globalOpportunityScore ?? 0) || b.researchCount - a.researchCount);
+
+  let globalRank = 0;
+  for (const keyword of keywords) {
+    if (keyword.globalOpportunityScore !== null) keyword.globalRank = ++globalRank;
+  }
 
   const assetConditions = [
     eq(assetOpportunitySnapshots.scoringVersion, SCORING_VERSION),
