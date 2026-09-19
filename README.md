@@ -69,4 +69,18 @@ Untuk backup manual:
 npm run db:backup
 ```
 
+Restore default ke database testing lokal:
+
+```bash
+npm run db:restore
+```
+
+Perintah tersebut mengambil `BACKUP_LATEST_KEY` dari R2 dan membuat `storage/restore-test.sqlite`. Database utama tidak akan disentuh. Untuk memulihkan archive tertentu:
+
+```bash
+npm run db:restore -- --key backups/archive/2026-09-19/database-20260919102208.sql.gz
+```
+
+Jika file testing sudah ada dan memang ingin ditimpa, tambahkan `--replace`. Script selalu menjalankan `PRAGMA integrity_check` dan menampilkan jumlah `research_runs`, `assets`, serta `asset_keywords` setelah restore.
+
 Di Cloudflare R2, buat lifecycle rule hanya untuk prefix `backups/archive/`. Jangan buat lifecycle rule untuk `backups/latest/`. Aktifkan Bucket Lock pada prefix archive sesuai masa retensi yang diinginkan, misalnya 30 hari.
