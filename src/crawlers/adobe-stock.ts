@@ -40,6 +40,10 @@ import {
   type ResearchHooks,
   withRetry
 } from "./adobe-stock.persistence";
+import {
+  ResearchCancelledError,
+  throwIfResearchCancelled
+} from "../services/research-cancellation";
 
 export { applyStealthScripts } from "./adobe-stock.core";
 
@@ -56,6 +60,21 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
   let requestHandled = false;
   let requestSucceeded = false;
+  const activePages = new Set<Page>();
+  const cancellationSignal = hooks.cancellationSignal;
+  const closeActivePages = () => {
+    for (const activePage of activePages) {
+      void activePage.close().catch(() => undefined);
+    }
+  };
+  cancellationSignal?.addEventListener("abort", closeActivePages, { once: true });
+  throwIfResearchCancelled(cancellationSignal);
+  const ensureResearchActive = async () => {
+    throwIfResearchCancelled(cancellationSignal);
+    const latestRun = await getResearchRun(researchRunId);
+    if (!latestRun) throw new Error("Research run tidak ditemukan");
+    if (latestRun.status === "cancelled") throw new ResearchCancelledError();
+  };
   const selectedProxy = await selectProxyForResearch();
   if (selectedProxy) {
     await appendResearchEvent(
@@ -82,8 +101,10 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   );
 
   const executeScrapingSession = async (page: Page) => {
-    await applyStealthScripts(page);
-    requestHandled = true;
+    activePages.add(page);
+    try {
+      await applyStealthScripts(page);
+      requestHandled = true;
       const scrapingLocation = await collectScrapingLocation(page);
       const locationLabel = [
         scrapingLocation.city,
@@ -223,8 +244,12 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         if (keywordPage && !keywordPage.isClosed() && keywordPageUses < keywordPageRotationLimit) {
           return keywordPage;
         }
-        await keywordPage?.close().catch(() => undefined);
+        if (keywordPage) {
+          activePages.delete(keywordPage);
+          await keywordPage.close().catch(() => undefined);
+        }
         keywordPage = await page.context().newPage();
+        activePages.add(keywordPage);
         await applyStealthScripts(keywordPage);
         keywordPageUses = 0;
         return keywordPage;
@@ -233,6 +258,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         let selected = 0;
         let fetched = 0;
         for (const item of items) {
+          throwIfResearchCancelled(cancellationSignal);
           if (selected >= keywordDetailLimitPerSort) break;
           selected += 1;
           if (enrichedAssetIds.has(item.externalId)) continue;
@@ -251,10 +277,14 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           if (status === "failed") keywordFailed += 1;
           if (status !== "failed") enrichedAssetIds.add(item.externalId);
           if (status === "failed") {
-            await keywordPage?.close().catch(() => undefined);
+            if (keywordPage) {
+              activePages.delete(keywordPage);
+              await keywordPage.close().catch(() => undefined);
+            }
             keywordPage = null;
             keywordPageUses = 0;
           }
+          throwIfResearchCancelled(cancellationSignal);
         }
         return { selected, fetched, sortMode };
       };
@@ -262,10 +292,10 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         for (const suggestion of queryTargets) {
           const queryLabel = suggestion.suggestion || "Page One";
           for (const sortMode of sortModes) {
+          await ensureResearchActive();
           const latestRun = await getResearchRun(researchRunId);
           if (!latestRun || latestRun.status === "cancelled") {
-            requestSucceeded = true;
-            return;
+            throw new ResearchCancelledError();
           }
 
           const queryKey = `${suggestion.suggestion}\u001f${sortMode}`;
@@ -309,7 +339,8 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
                 selectorTimeout
               ),
               2,
-              () => getPageDiagnostics(page)
+              () => getPageDiagnostics(page),
+              cancellationSignal
             );
           } catch (error) {
             await persistFailedSearch(researchRunId, suggestion.suggestion, run.assetType, sortMode, run.locale, run.assetsPerQuery);
@@ -367,14 +398,21 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           }
 
           await randomJitter(700, 1800);
+          await ensureResearchActive();
           }
         }
       } finally {
         const pageToClose: Page | null = keywordPage as Page | null;
         keywordPage = null;
-        if (pageToClose) await pageToClose.close().catch(() => undefined);
+        if (pageToClose) {
+          activePages.delete(pageToClose);
+          await pageToClose.close().catch(() => undefined);
+        }
       }
       requestSucceeded = true;
+    } finally {
+      activePages.delete(page);
+    }
     };
 
     if (env.playwrightCdpUrl) {
@@ -421,6 +459,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         // browser, close() clears Playwright-owned contexts and disconnects;
         // it does not stop the external Chromium process managed by systemd.
         await browser?.close().catch(() => undefined);
+        cancellationSignal?.removeEventListener("abort", closeActivePages);
       }
       return;
     }
@@ -491,5 +530,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         );
       }
       throw error;
+    } finally {
+      cancellationSignal?.removeEventListener("abort", closeActivePages);
     }
 }

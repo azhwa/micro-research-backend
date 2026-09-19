@@ -9,6 +9,7 @@ import {
   suggestions
 } from "../db/schema";
 import { appendResearchEvent, getResearchRun, makeStableId } from "../services/research.service";
+import { ResearchCancelledError, throwIfResearchCancelled } from "../services/research-cancellation";
 import { normalizeKeyword, type ResultCountQualifier } from "../services/research-metrics";
 import {
   classifyFailure,
@@ -290,13 +291,16 @@ export async function withRetry<T>(
   label: string,
   task: () => Promise<T>,
   maxAttempts = 2,
-  diagnostics?: () => Promise<PageDiagnostics>
+  diagnostics?: () => Promise<PageDiagnostics>,
+  cancellationSignal?: AbortSignal
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    throwIfResearchCancelled(cancellationSignal);
     try {
       return await task();
     } catch (error) {
+      if (cancellationSignal?.aborted) throw new ResearchCancelledError();
       lastError = error;
       const pageState = diagnostics ? await diagnostics() : undefined;
       const failureType = classifyFailure(error, pageState);
@@ -313,7 +317,17 @@ export async function withRetry<T>(
           `${label} gagal [${failureType}], mencoba ulang (${attempt}/${maxAttempts - 1})`,
           metadata
         );
-        await new Promise((resolve) => setTimeout(resolve, 1_500 * attempt));
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            cancellationSignal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, 1_500 * attempt);
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(new ResearchCancelledError());
+          };
+          cancellationSignal?.addEventListener("abort", onAbort, { once: true });
+        });
       } else {
         await appendResearchEvent(
           researchRunId,
@@ -334,6 +348,7 @@ export async function withRetry<T>(
 
 export interface ResearchHooks {
   onQueryProgress?: (completed: number, total: number) => Promise<void>;
+  cancellationSignal?: AbortSignal;
 }
 
 export interface ExistingSearchAsset extends CollectedAsset {
@@ -397,4 +412,3 @@ export async function loadResumeState(researchRunId: string) {
     assetsByQueryAndSort
   };
 }
-

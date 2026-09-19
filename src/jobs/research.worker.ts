@@ -5,6 +5,10 @@ import { runAdobeResearch } from "../crawlers/adobe-stock";
 import { appendResearchEvent, getResearchRun } from "../services/research.service";
 import { persistResearchSnapshots } from "../services/snapshot.service";
 import { env } from "../config/env";
+import {
+  registerResearchCancellation,
+  unregisterResearchCancellation
+} from "../services/research-cancellation";
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ATTEMPTS = 3;
@@ -96,6 +100,7 @@ class ResearchWorker {
 
   private async processJob(job: typeof researchJobs.$inferSelect): Promise<void> {
     const database = getDatabase();
+    const cancellationController = new AbortController();
 
     await database
       .update(researchJobs)
@@ -115,9 +120,11 @@ class ResearchWorker {
     await appendResearchEvent(job.researchRunId, "info", "job_started", "Research job dimulai", {
       attempt: job.attempts + 1
     });
+    registerResearchCancellation(job.researchRunId, cancellationController);
 
     try {
       await runAdobeResearch(job.researchRunId, {
+        cancellationSignal: cancellationController.signal,
         onQueryProgress: async (completed) => {
           const now = new Date();
           await database
@@ -171,6 +178,15 @@ class ResearchWorker {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      const latestRun = await getResearchRun(job.researchRunId);
+      if (latestRun?.status === "cancelled") {
+        await appendResearchEvent(job.researchRunId, "warning", "job_cancelled", "Research dihentikan");
+        await database
+          .update(researchJobs)
+          .set({ status: "cancelled", lockedAt: null, heartbeatAt: null, updatedAt: new Date() })
+          .where(eq(researchJobs.id, job.id));
+        return;
+      }
       const shouldRetry = job.attempts < MAX_ATTEMPTS;
       if (shouldRetry) {
         await appendResearchEvent(
@@ -203,9 +219,10 @@ class ResearchWorker {
           .set({ status: "failed", lockedAt: null, heartbeatAt: null, lastError: message, updatedAt: new Date() })
           .where(eq(researchJobs.id, job.id));
       }
+    } finally {
+      unregisterResearchCancellation(job.researchRunId, cancellationController);
     }
   }
 }
 
 export const researchWorker = new ResearchWorker();
-

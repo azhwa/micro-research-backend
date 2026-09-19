@@ -15,6 +15,7 @@ import {
 } from "../db/schema";
 import { getDatabase } from "../db/client";
 import type { AuthContext } from "../auth";
+import { requestResearchCancellation } from "./research-cancellation";
 
 export type AssetType = "images" | "videos";
 export type ResearchMode = "fast" | "full" | "primary";
@@ -116,6 +117,7 @@ export async function cancelResearchRun(id: string, auth?: AuthContext | null) {
     .set({ status: "cancelled", updatedAt: new Date() })
     .where(eq(researchJobs.researchRunId, id));
 
+  requestResearchCancellation(id);
   await appendResearchEvent(id, "warning", "run_cancelled", "Research dibatalkan oleh user");
 
   return getResearchRun(id);

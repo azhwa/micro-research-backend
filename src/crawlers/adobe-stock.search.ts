@@ -93,6 +93,40 @@ export async function collectSearchResults(
   const result = await page.evaluate((maxAssets) => {
     const body = document.body?.innerText ?? "";
 
+    const srcsetUrl = (value: string | null): string | null => {
+      if (!value) return null;
+      const candidates = value
+        .split(",")
+        .map((entry) => entry.trim().split(/\s+/)[0])
+        .filter(Boolean);
+      return candidates[candidates.length - 1] ?? null;
+    };
+
+    const thumbnailUrl = (image: HTMLImageElement | null): string | null => {
+      if (!image) return null;
+      const candidates = [
+        image.getAttribute("data-src"),
+        image.getAttribute("data-lazy-src"),
+        image.getAttribute("data-original"),
+        srcsetUrl(image.getAttribute("data-srcset")),
+        srcsetUrl(image.getAttribute("srcset")),
+        image.currentSrc,
+        image.getAttribute("src")
+      ];
+
+      for (const candidate of candidates) {
+        if (!candidate || /(?:spacer|placeholder|transparent)\.gif(?:$|[?#])/i.test(candidate)) {
+          continue;
+        }
+        try {
+          return new URL(candidate, location.href).toString();
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    };
+
     const nodes = Array.from(document.querySelectorAll("[data-content-id]"));
     const seen = new Set<string>();
     const items: Array<Record<string, unknown>> = [];
@@ -123,7 +157,7 @@ export async function collectSearchResults(
         externalId,
         title: title.trim(),
         assetUrl: href ? new URL(href, location.href).toString() : location.href,
-        thumbnailUrl: image?.getAttribute("src") || image?.getAttribute("data-src") || null,
+        thumbnailUrl: thumbnailUrl(image),
         width: widthMeta?.getAttribute("content") || null,
         height: heightMeta?.getAttribute("content") || null,
         fileExtension: extensionMatch?.[1]?.toLowerCase() || null,
