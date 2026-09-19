@@ -13,6 +13,7 @@ import { researchRoutes } from "./routes/research";
 import { geminiRoutes } from "./routes/gemini";
 import { proxyRoutes } from "./routes/proxies";
 import { seedDiscoveryRoutes } from "./routes/seed-discovery";
+import { promptRoutes } from "./routes/prompts";
 import { authenticateRequest } from "./auth";
 import { authConfigured, env } from "./config/env";
 
@@ -63,6 +64,7 @@ export function buildApp() {
   app.register(geminiRoutes);
   app.register(proxyRoutes);
   app.register(seedDiscoveryRoutes);
+  app.register(promptRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(
