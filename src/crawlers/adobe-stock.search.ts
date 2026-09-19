@@ -102,20 +102,34 @@ export async function collectSearchResults(
       return candidates[candidates.length - 1] ?? null;
     };
 
-    const thumbnailUrl = (image: HTMLImageElement | null): string | null => {
-      if (!image) return null;
+    const thumbnailUrl = (node: Element, image: HTMLImageElement | null): string | null => {
+      const sources = Array.from(node.querySelectorAll("source"));
       const candidates = [
-        image.getAttribute("data-src"),
-        image.getAttribute("data-lazy-src"),
-        image.getAttribute("data-original"),
-        srcsetUrl(image.getAttribute("data-srcset")),
-        srcsetUrl(image.getAttribute("srcset")),
-        image.currentSrc,
-        image.getAttribute("src")
+        image?.getAttribute("data-src"),
+        image?.getAttribute("data-lazy"),
+        image?.getAttribute("data-lazy-src"),
+        image?.getAttribute("data-original"),
+        srcsetUrl(image?.getAttribute("data-srcset") ?? null),
+        srcsetUrl(image?.getAttribute("srcset") ?? null),
+        ...sources.flatMap((source) => [
+          source.getAttribute("data-lazy"),
+          source.getAttribute("data-src"),
+          srcsetUrl(source.getAttribute("data-lazy-srcset")),
+          srcsetUrl(source.getAttribute("data-srcset")),
+          srcsetUrl(source.getAttribute("srcset"))
+        ]),
+        node.querySelector('meta[itemprop="thumbnailUrl"]')?.getAttribute("content"),
+        node.querySelector('meta[itemprop="contentUrl"]')?.getAttribute("content"),
+        image?.currentSrc,
+        image?.getAttribute("src")
       ];
 
       for (const candidate of candidates) {
-        if (!candidate || /(?:spacer|placeholder|transparent)\.gif(?:$|[?#])/i.test(candidate)) {
+        if (
+          !candidate ||
+          /^data:/i.test(candidate) ||
+          /(?:spacer|placeholder|transparent)\.gif(?:$|[?#])/i.test(candidate)
+        ) {
           continue;
         }
         try {
@@ -157,7 +171,7 @@ export async function collectSearchResults(
         externalId,
         title: title.trim(),
         assetUrl: href ? new URL(href, location.href).toString() : location.href,
-        thumbnailUrl: thumbnailUrl(image),
+        thumbnailUrl: thumbnailUrl(node, image),
         width: widthMeta?.getAttribute("content") || null,
         height: heightMeta?.getAttribute("content") || null,
         fileExtension: extensionMatch?.[1]?.toLowerCase() || null,
