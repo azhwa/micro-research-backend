@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { getResearchRun } from "../services/research.service";
 import { generatePromptSet } from "../services/prompt-generation.service";
+import { deleteSavedPrompt, exportSavedPrompts, listSavedPrompts } from "../services/saved-prompt.service";
 
 interface CreateBody {
   seed?: unknown;
@@ -19,6 +20,25 @@ function authOrThrow(request: { auth: import("../auth").AuthContext | null }) {
 }
 
 export async function promptRoutes(app: FastifyInstance): Promise<void> {
+  app.get<{ Querystring: { limit?: string } }>("/api/prompts", async (request) => {
+    const limit = Number(request.query.limit ?? 100);
+    return listSavedPrompts(Number.isFinite(limit) ? limit : 100, authOrThrow(request));
+  });
+
+  app.get<{ Params: { format: string } }>("/api/prompts/export.:format", async (request, reply) => {
+    const format = request.params.format === "txt" ? "txt" : request.params.format === "csv" ? "csv" : null;
+    if (!format) return reply.status(400).send({ error: "INVALID_EXPORT_FORMAT" });
+    const content = await exportSavedPrompts(format, authOrThrow(request));
+    reply.header("content-type", format === "csv" ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8");
+    reply.header("content-disposition", `attachment; filename="stockscope-prompts.${format}"`);
+    return reply.send(content);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/prompts/:id", async (request, reply) => {
+    const result = await deleteSavedPrompt(request.params.id, authOrThrow(request));
+    return result ?? reply.status(404).send({ error: "PROMPT_NOT_FOUND" });
+  });
+
   app.post<{ Body: CreateBody }>("/api/prompt-generations", async (request, reply) => {
     const auth = authOrThrow(request);
     const researchRunId = typeof request.body?.researchRunId === "string" ? request.body.researchRunId : undefined;

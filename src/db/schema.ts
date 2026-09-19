@@ -74,6 +74,34 @@ export const researchJobs = sqliteTable(
   ]
 );
 
+export const researchQueue = sqliteTable(
+  "research_queue",
+  {
+    id: text("id").primaryKey(),
+    seedKeyword: text("seed_keyword").notNull(),
+    category: text("category").notNull().default("general"),
+    ownerUserId: text("owner_clerk_user_id"),
+    organizationId: text("organization_id"),
+    assetType: text("asset_type").notNull().default("images"),
+    locale: text("locale").notNull().default("en-GB"),
+    mode: text("mode").notNull().default("full"),
+    maxSuggestions: integer("max_suggestions").notNull().default(1),
+    assetsPerQuery: integer("assets_per_query").notNull().default(100),
+    autocompleteEnabled: integer("autocomplete_enabled", { mode: "boolean" }).notNull().default(false),
+    status: text("status").notNull().default("queued"),
+    researchRunId: text("research_run_id"),
+    errorMessage: text("error_message"),
+    createdAt: createdAt(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("research_queue_status_idx").on(table.status, table.createdAt),
+    index("research_queue_owner_idx").on(table.ownerUserId, table.status),
+    index("research_queue_org_idx").on(table.organizationId, table.status)
+  ]
+);
+
 export const researchEvents = sqliteTable(
   "research_events",
   {
@@ -349,6 +377,35 @@ export const aiRecommendations = sqliteTable(
     index("ai_recommendations_run_idx").on(table.researchRunId),
     index("ai_recommendations_status_idx").on(table.status),
     uniqueIndex("ai_recommendations_input_idx").on(table.inputHash)
+  ]
+);
+
+export const savedPrompts = sqliteTable(
+  "saved_prompts",
+  {
+    id: text("id").primaryKey(),
+    generationId: text("generation_id").references(() => aiRecommendations.id, { onDelete: "cascade" }),
+    ownerUserId: text("owner_user_id"),
+    organizationId: text("organization_id"),
+    seed: text("seed").notNull(),
+    category: text("category").notNull().default("general"),
+    assetType: text("asset_type").notNull().default("images"),
+    locale: text("locale").notNull().default("en-GB"),
+    title: text("title").notNull(),
+    prompt: text("prompt").notNull(),
+    negativePrompt: text("negative_prompt").notNull().default(""),
+    keywordFocusJson: text("keyword_focus_json").notNull().default("[]"),
+    commercialRationale: text("commercial_rationale").notNull().default(""),
+    confidence: text("confidence").notNull().default("medium"),
+    status: text("status").notNull().default("saved"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("saved_prompts_owner_created_idx").on(table.ownerUserId, table.createdAt),
+    index("saved_prompts_org_created_idx").on(table.organizationId, table.createdAt),
+    index("saved_prompts_generation_idx").on(table.generationId),
+    index("saved_prompts_status_idx").on(table.status)
   ]
 );
 

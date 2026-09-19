@@ -17,6 +17,12 @@ import {
   type AssetType,
   type ResearchMode
 } from "../services/research.service";
+import {
+  createResearchQueueItem,
+  deleteResearchQueueItem,
+  listResearchQueue,
+  startResearchQueueItem
+} from "../services/research-queue.service";
 import { listResearchDetailLogs } from "../services/research-log.service";
 import { invalidateGlobalInsightsCache } from "../services/snapshot.service";
 import { env } from "../config/env";
@@ -32,6 +38,13 @@ interface CreateResearchBody {
   mode?: unknown;
 }
 
+interface CreateQueueBody {
+  keyword?: unknown;
+  category?: unknown;
+  assetType?: unknown;
+  locale?: unknown;
+}
+
 function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0
     ? value
@@ -39,6 +52,43 @@ function positiveInteger(value: unknown, fallback: number): number {
 }
 
 export async function researchRoutes(app: FastifyInstance): Promise<void> {
+  app.post<{ Body: CreateQueueBody }>("/api/research-queue", async (request, reply) => {
+    const keyword = typeof request.body?.keyword === "string" ? request.body.keyword.trim() : "";
+    if (!keyword || keyword.length > 120) {
+      return reply.status(400).send({ error: "INVALID_KEYWORD", message: "keyword wajib diisi dan maksimal 120 karakter" });
+    }
+    const item = await createResearchQueueItem({
+      seedKeyword: keyword,
+      category: typeof request.body?.category === "string" && request.body.category.trim() ? request.body.category.trim().slice(0, 40) : "general",
+      ownerUserId: request.auth?.isDevBypass ? null : request.auth?.userId,
+      organizationId: request.auth?.isDevBypass ? null : request.auth?.organizationId,
+      assetType: request.body?.assetType === "videos" ? "videos" : "images",
+      locale: typeof request.body?.locale === "string" && request.body.locale.trim() ? request.body.locale.trim() : "en-GB"
+    });
+    return reply.status(201).send(item);
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/research-queue", async (request) => {
+    const limit = Number(request.query.limit ?? 100);
+    return listResearchQueue(Number.isFinite(limit) ? limit : 100, request.auth);
+  });
+
+  app.post<{ Params: { id: string } }>("/api/research-queue/:id/start", async (request, reply) => {
+    try {
+      const result = await startResearchQueueItem(request.params.id, request.auth);
+      if (!result) return reply.status(404).send({ error: "RESEARCH_QUEUE_NOT_FOUND" });
+      return result;
+    } catch (error) {
+      request.log.error({ err: error, queueId: request.params.id }, "Research queue start failed");
+      return reply.status(500).send({ error: "RESEARCH_QUEUE_START_FAILED", message: "Research queue tidak dapat dimulai" });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/research-queue/:id", async (request, reply) => {
+    const result = await deleteResearchQueueItem(request.params.id, request.auth);
+    return result ?? reply.status(404).send({ error: "RESEARCH_QUEUE_NOT_FOUND" });
+  });
+
   app.post<{ Body: CreateResearchBody }>(
     "/api/research-runs",
     async (request, reply) => {

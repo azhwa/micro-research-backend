@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { aiRecommendations } from "../db/schema";
 import type { AuthContext } from "../auth";
+import { saveGeneratedPrompts } from "./saved-prompt.service";
 import { getAiContext } from "./insights.service";
 import { getGlobalAiContext } from "./snapshot.service";
 import {
@@ -26,12 +27,11 @@ const imagePromptSchema = {
           title: { type: "string" },
           prompt: { type: "string" },
           negativePrompt: { type: "string" },
-          aspectRatio: { type: "string" },
           keywordFocus: { type: "array", items: { type: "string" } },
           commercialRationale: { type: "string" },
           confidence: { type: "string", enum: ["low", "medium", "high"] }
         },
-        required: ["title", "prompt", "negativePrompt", "aspectRatio", "keywordFocus", "commercialRationale", "confidence"]
+        required: ["title", "prompt", "negativePrompt", "keywordFocus", "commercialRationale", "confidence"]
       }
     },
     cautions: { type: "array", items: { type: "string" } }
@@ -65,6 +65,23 @@ function parseJson(value: string | null) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+function normalizePromptResponse(value: unknown) {
+  const source = value && typeof value === "object" ? value as Record<string, any> : {};
+  const prompts = Array.isArray(source.prompts) ? source.prompts.map((item: any) => ({
+    title: text(item?.title, 160),
+    prompt: text(item?.prompt, 2_000),
+    negativePrompt: text(item?.negativePrompt, 1_000),
+    keywordFocus: Array.isArray(item?.keywordFocus) ? item.keywordFocus.filter((entry: unknown): entry is string => typeof entry === "string").slice(0, 12) : [],
+    commercialRationale: text(item?.commercialRationale, 600),
+    confidence: item?.confidence === "high" || item?.confidence === "low" ? item.confidence : "medium"
+  })) : [];
+  return {
+    summary: text(source.summary, 800),
+    prompts,
+    cautions: Array.isArray(source.cautions) ? source.cautions.filter((entry: unknown): entry is string => typeof entry === "string").slice(0, 8) : []
+  };
+}
+
 function publicPromptGeneration(row: typeof aiRecommendations.$inferSelect) {
   return {
     id: row.id,
@@ -73,7 +90,7 @@ function publicPromptGeneration(row: typeof aiRecommendations.$inferSelect) {
     model: row.model,
     inputHash: row.inputHash,
     status: row.status,
-    response: parseJson(row.responseJson),
+    response: row.responseJson ? normalizePromptResponse(parseJson(row.responseJson)) : null,
     errorMessage: row.errorMessage,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -121,7 +138,6 @@ function promptForContext(context: unknown, requestedCount: number, style: strin
     "Prioritaskan konsep komersial yang mudah diberi metadata dan hindari logo, merek, karakter berhak cipta, nama artis, watermark, teks acak, dan klaim penjualan.",
     "Setiap prompt harus memiliki angle visual berbeda. Jangan mengulang kalimat prompt.",
     "Negative prompt harus ringkas dan relevan untuk mengurangi artefak, teks, logo, watermark, anatomi buruk, dan duplikasi.",
-    "Aspect ratio gunakan salah satu: 1:1, 4:3, 3:2, 16:9, atau 9:16.",
     "Confidence hanya mengukur kekuatan evidence dari data, bukan jaminan gambar akan laku.",
     "Kembalikan hanya JSON sesuai schema, tanpa markdown.",
     "DATA RISET:",
@@ -152,7 +168,11 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
     .digest("hex");
   const database = getDatabase();
   const existing = await database.select().from(aiRecommendations).where(eq(aiRecommendations.inputHash, inputHash)).limit(1);
-  if (existing[0]?.status === "completed") return { generation: publicPromptGeneration(existing[0]), context };
+  if (existing[0]?.status === "completed") {
+    const generation = publicPromptGeneration(existing[0]);
+    if (generation.response) await persistSavedPrompts(existing[0].id, auth, context, generation.response);
+    return { generation, context };
+  }
 
   let row = existing[0];
   if (row) {
@@ -187,7 +207,8 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
       imagePromptSchema,
       Math.min(8_000, 1_000 + requestedCount * 700)
     );
-    const serialized = JSON.stringify(response);
+    const normalizedResponse = normalizePromptResponse(response);
+    const serialized = JSON.stringify(normalizedResponse);
     if (serialized.length > 250_000) throw new Error("Prompt response terlalu besar");
     const [completed] = await database.update(aiRecommendations).set({
       status: "completed",
@@ -196,10 +217,37 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
       completedAt: new Date(),
       updatedAt: new Date()
     }).where(eq(aiRecommendations.id, row.id)).returning();
-    return completed ? { generation: publicPromptGeneration(completed), context } : null;
+    if (!completed) return null;
+    const generation = publicPromptGeneration(completed);
+    if (generation.response) await persistSavedPrompts(completed.id, auth, context, generation.response);
+    return { generation, context };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Prompt generation gagal";
     await database.update(aiRecommendations).set({ status: "failed", errorMessage: message.slice(0, 1_000), updatedAt: new Date() }).where(eq(aiRecommendations.id, row.id));
     throw error;
   }
+}
+
+async function persistSavedPrompts(
+  generationId: string,
+  auth: AuthContext,
+  context: Record<string, any>,
+  response: { prompts: Array<{ title: string; prompt: string; negativePrompt: string; keywordFocus: string[]; commercialRationale: string; confidence: string }> }
+) {
+  const request = context.request ?? {};
+  await saveGeneratedPrompts(response.prompts.map((item) => ({
+    generationId,
+    ownerUserId: auth.isDevBypass ? null : auth.userId,
+    organizationId: auth.isDevBypass ? null : auth.organizationId,
+    seed: text(request.seed, 120),
+    category: text(request.category, 40) || "general",
+    assetType: request.assetType === "videos" ? "videos" : "images",
+    locale: text(request.locale, 20) || "en-GB",
+    title: item.title,
+    prompt: item.prompt,
+    negativePrompt: item.negativePrompt,
+    keywordFocus: item.keywordFocus,
+    commercialRationale: item.commercialRationale,
+    confidence: item.confidence
+  })));
 }
