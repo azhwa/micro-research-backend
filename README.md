@@ -45,3 +45,20 @@ pm2 logs micro-research-backend
 `ecosystem.config.js` menggunakan satu instance fork, tanpa watch, dengan restart otomatis dan batas memory 550 MB. Batas ini hanya untuk proses aplikasi yang dipantau PM2; Chromium Playwright dan `cloudflared` tetap perlu dipantau dari total penggunaan RAM VPS. Environment rahasia tetap dibaca dari file `.env` di server dan tidak disimpan di repository.
 
 Deployment saat ini menargetkan Ubuntu 20.04, sehingga versi Playwright dikunci ke `1.62.1`. Jangan menaikkannya ke `1.63+` tanpa upgrade OS karena Playwright 1.63 menghentikan dukungan Ubuntu 20.04.
+
+## Backup database ke Cloudflare R2
+
+Backup menggunakan logical SQLite dump yang dikompresi gzip. Setiap backup berhasil diunggah ke dua lokasi:
+
+- `backups/latest/database.sql.gz`: salinan terakhir yang tidak ikut lifecycle penghapusan.
+- `backups/archive/YYYY-MM-DD/database-YYYYMMDDHHmmss.sql.gz`: salinan bertimestamp untuk retensi harian/mingguan/bulanan.
+
+Isi `R2_*` dan aktifkan `BACKUP_ENABLED=true` di server. Gunakan token R2 khusus bucket backup, dan jangan beri token aplikasi izin mengubah bucket lock. Service melakukan pengecekan setiap jam, tetapi hanya membuat snapshot baru jika salinan `latest` sudah lebih tua dari `BACKUP_INTERVAL_HOURS`.
+
+Untuk backup manual:
+
+```bash
+npm run db:backup
+```
+
+Di Cloudflare R2, buat lifecycle rule hanya untuk prefix `backups/archive/`. Jangan buat lifecycle rule untuk `backups/latest/`. Aktifkan Bucket Lock pada prefix archive sesuai masa retensi yang diinginkan, misalnya 30 hari.

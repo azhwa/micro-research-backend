@@ -1,15 +1,49 @@
+import os from "node:os";
 import { desc } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { researchEvents, researchJobs, researchRuns } from "../db/schema";
 import { env } from "../config/env";
 
+let previousCpuUsage = process.cpuUsage();
+let previousCpuAt = process.hrtime.bigint();
+
+function round(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function processCpuPercent(): number {
+  const now = process.hrtime.bigint();
+  const elapsedMs = Number(now - previousCpuAt) / 1_000_000;
+  const usage = process.cpuUsage(previousCpuUsage);
+  previousCpuUsage = process.cpuUsage();
+  previousCpuAt = now;
+  if (elapsedMs <= 0) return 0;
+  const cpuMs = (usage.user + usage.system) / 1_000;
+  return round((cpuMs / elapsedMs / Math.max(os.cpus().length, 1)) * 100);
+}
+
+async function getCdpHealth() {
+  if (!env.playwrightCdpUrl) return { configured: false, reachable: false, browserVersion: null as string | null };
+  try {
+    const response = await fetch(new URL("/json/version", env.playwrightCdpUrl), {
+      signal: AbortSignal.timeout(1_500)
+    });
+    if (!response.ok) return { configured: true, reachable: false, browserVersion: null };
+    const payload = await response.json() as { Browser?: unknown };
+    return { configured: true, reachable: true, browserVersion: typeof payload.Browser === "string" ? payload.Browser : null };
+  } catch {
+    return { configured: true, reachable: false, browserVersion: null };
+  }
+}
+
 export async function getMonitoringSnapshot() {
   const database = getDatabase();
-  const [runs, jobs, events] = await Promise.all([
+  const [runs, jobs, events, cdp] = await Promise.all([
     database.select().from(researchRuns).orderBy(desc(researchRuns.createdAt)).limit(500),
     database.select().from(researchJobs).orderBy(desc(researchJobs.updatedAt)).limit(500),
     database.select({ eventType: researchEvents.eventType, level: researchEvents.level, metadataJson: researchEvents.metadataJson, createdAt: researchEvents.createdAt })
-      .from(researchEvents).orderBy(desc(researchEvents.createdAt)).limit(2_000)
+      .from(researchEvents).orderBy(desc(researchEvents.createdAt)).limit(2_000),
+    getCdpHealth()
   ]);
 
   const countBy = (values: string[]) => values.reduce<Record<string, number>>((result, value) => {
@@ -57,6 +91,21 @@ export async function getMonitoringSnapshot() {
         empty: enrichment.empty,
         failed: enrichment.failed
       }
+    },
+    system: {
+      cpu: {
+        load1m: round(os.loadavg()[0] ?? 0),
+        estimatedPercent: round(((os.loadavg()[0] ?? 0) / Math.max(os.cpus().length, 1)) * 100),
+        processPercent: processCpuPercent()
+      },
+      memory: {
+        totalMb: Math.round(os.totalmem() / 1_048_576),
+        freeMb: Math.round(os.freemem() / 1_048_576),
+        usedPercent: round((1 - os.freemem() / os.totalmem()) * 100),
+        processRssMb: Math.round(process.memoryUsage().rss / 1_048_576)
+      },
+      uptimeSeconds: Math.round(os.uptime()),
+      cdp
     }
   };
 }

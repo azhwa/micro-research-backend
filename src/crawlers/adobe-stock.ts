@@ -447,7 +447,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       );
       let browser: Browser | null = null;
       try {
-        browser = await chromium.connectOverCDP(env.playwrightCdpUrl);
+        browser = await chromium.connectOverCDP(env.playwrightCdpUrl, {
+          timeout: env.playwrightCdpConnectTimeoutMs
+        });
         const context = browser.contexts()[0] || (await browser.newContext({
           viewport: { width: 1920, height: 1080 }
         }));

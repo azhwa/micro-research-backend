@@ -12,6 +12,7 @@ import {
 import { flushResearchDetailLog } from "../services/research-log.service";
 
 const POLL_INTERVAL_MS = 5_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_ATTEMPTS = 3;
 const STALE_JOB_MS = 20 * 60 * 1_000;
 
@@ -102,6 +103,9 @@ class ResearchWorker {
   private async processJob(job: typeof researchJobs.$inferSelect): Promise<void> {
     const database = getDatabase();
     const cancellationController = new AbortController();
+    let researchTimedOut = false;
+    let timeout: NodeJS.Timeout | undefined;
+    let heartbeat: NodeJS.Timeout | undefined;
 
     await database
       .update(researchJobs)
@@ -122,6 +126,18 @@ class ResearchWorker {
       attempt: job.attempts + 1
     });
     registerResearchCancellation(job.researchRunId, cancellationController);
+    timeout = setTimeout(() => {
+      researchTimedOut = true;
+      cancellationController.abort();
+    }, env.researchTimeoutMs);
+    heartbeat = setInterval(() => {
+      const now = new Date();
+      void database
+        .update(researchJobs)
+        .set({ heartbeatAt: now, updatedAt: now })
+        .where(eq(researchJobs.id, job.id))
+        .catch(() => undefined);
+    }, HEARTBEAT_INTERVAL_MS);
 
     try {
       await runAdobeResearch(job.researchRunId, {
@@ -178,7 +194,9 @@ class ResearchWorker {
           .where(eq(researchJobs.id, job.id));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message = researchTimedOut
+        ? `Research melewati batas waktu ${Math.round(env.researchTimeoutMs / 60_000)} menit`
+        : error instanceof Error ? error.message : "Unknown error";
       const latestRun = await getResearchRun(job.researchRunId);
       if (latestRun?.status === "cancelled") {
         await appendResearchEvent(job.researchRunId, "warning", "job_cancelled", "Research dihentikan");
@@ -221,6 +239,8 @@ class ResearchWorker {
           .where(eq(researchJobs.id, job.id));
       }
     } finally {
+      if (timeout) clearTimeout(timeout);
+      if (heartbeat) clearInterval(heartbeat);
       await flushResearchDetailLog(job.researchRunId);
       unregisterResearchCancellation(job.researchRunId, cancellationController);
     }

@@ -29,6 +29,8 @@ export const env = {
   host: process.env.HOST ?? "127.0.0.1",
   playwrightHeadless: parseBoolean(process.env.PLAYWRIGHT_HEADLESS, true),
   playwrightCdpUrl: process.env.PLAYWRIGHT_CDP_URL?.trim() ?? "",
+  playwrightCdpConnectTimeoutMs: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_CONNECT_TIMEOUT_MS, 30_000, 120_000),
+  researchTimeoutMs: parsePositiveInteger(process.env.RESEARCH_TIMEOUT_MINUTES, 45, 180) * 60_000,
   workerConcurrency: parsePositiveInteger(process.env.WORKER_CONCURRENCY, 1, 10),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
   tursoDatabaseUrl: process.env.TURSO_DATABASE_URL ?? "",
@@ -38,7 +40,16 @@ export const env = {
   authPasswordHash: process.env.AUTH_PASSWORD_HASH ?? "",
   authSessionSecret: process.env.AUTH_SESSION_SECRET ?? "",
   authSessionTtlHours: parsePositiveInteger(process.env.AUTH_SESSION_TTL_HOURS, 168, 24 * 365),
-  geminiEncryptionKey: process.env.GEMINI_ENCRYPTION_KEY ?? ""
+  geminiEncryptionKey: process.env.GEMINI_ENCRYPTION_KEY ?? "",
+  r2Endpoint: process.env.R2_ENDPOINT?.trim() ?? "",
+  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID?.trim() ?? "",
+  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY?.trim() ?? "",
+  r2Bucket: process.env.R2_BUCKET?.trim() ?? "",
+  backupEnabled: parseBoolean(process.env.BACKUP_ENABLED, false),
+  backupIntervalHours: parsePositiveInteger(process.env.BACKUP_INTERVAL_HOURS, 24, 24 * 31),
+  backupBatchSize: parsePositiveInteger(process.env.BACKUP_BATCH_SIZE, 500, 5_000),
+  backupLatestKey: process.env.BACKUP_LATEST_KEY?.trim() || "backups/latest/database.sql.gz",
+  backupArchivePrefix: process.env.BACKUP_ARCHIVE_PREFIX?.trim() || "backups/archive"
 } as const;
 
 export const authConfigured = Boolean(

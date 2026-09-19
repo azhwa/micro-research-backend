@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import {
   assetOpportunitySnapshots,
   assets,
@@ -19,6 +19,7 @@ import { researchScopeCondition } from "./research.service";
 import type { AuthContext } from "../auth";
 
 const SNAPSHOT_KEYWORD_LIMIT = 500;
+const GLOBAL_SNAPSHOT_PAGE_SIZE = 500;
 let backfillPromise: Promise<void> | null = null;
 
 function chunk<T>(items: T[], size: number) {
@@ -119,12 +120,11 @@ async function ensureSnapshotBackfill() {
         progressTotal: researchRuns.progressTotal,
         progressCompleted: researchRuns.progressCompleted
       }).from(researchRuns).where(eq(researchRuns.status, "completed")),
-      database.select({
-        researchRunId: keywordOpportunitySnapshots.researchRunId,
-        scoringVersion: keywordOpportunitySnapshots.scoringVersion
-      }).from(keywordOpportunitySnapshots)
+      database.selectDistinct({
+        researchRunId: keywordOpportunitySnapshots.researchRunId
+      }).from(keywordOpportunitySnapshots).where(eq(keywordOpportunitySnapshots.scoringVersion, SCORING_VERSION))
     ]);
-    const existingRuns = new Set(existing.filter((row) => row.scoringVersion === SCORING_VERSION).map((row) => row.researchRunId));
+    const existingRuns = new Set(existing.map((row) => row.researchRunId));
     for (const run of runs) {
       if (existingRuns.has(run.id)) continue;
       if (run.progressTotal > 0 && run.progressCompleted < run.progressTotal) continue;
@@ -224,20 +224,27 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
   if (options.assetType && options.assetType !== "all") conditions.push(eq(keywordOpportunitySnapshots.assetType, options.assetType));
   if (options.locale && options.locale !== "all") conditions.push(eq(keywordOpportunitySnapshots.locale, options.locale));
   if (options.category && options.category !== "all") conditions.push(eq(keywordOpportunitySnapshots.category, options.category));
-  const rows = await database
-    .select({ snapshot: keywordOpportunitySnapshots })
-    .from(keywordOpportunitySnapshots)
-    .innerJoin(researchRuns, eq(keywordOpportunitySnapshots.researchRunId, researchRuns.id))
-    .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(desc(keywordOpportunitySnapshots.observedAt));
-  const latestPerWindow = new Map<string, (typeof rows)[number]>();
-  for (const row of rows) {
-    const day = row.snapshot.observedAt.toISOString().slice(0, 10);
-    const key = [row.snapshot.normalizedKeyword, row.snapshot.assetType, row.snapshot.locale, row.snapshot.category, day].join("\u001f");
-    const existing = latestPerWindow.get(key);
-    if (!existing || existing.snapshot.observedAt < row.snapshot.observedAt) latestPerWindow.set(key, row);
+  const latestPerWindow = new Map<string, typeof keywordOpportunitySnapshots.$inferSelect>();
+  let snapshotOffset = 0;
+  while (true) {
+    const rows = await database
+      .select({ snapshot: keywordOpportunitySnapshots })
+      .from(keywordOpportunitySnapshots)
+      .innerJoin(researchRuns, eq(keywordOpportunitySnapshots.researchRunId, researchRuns.id))
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(keywordOpportunitySnapshots.observedAt), asc(keywordOpportunitySnapshots.id))
+      .limit(GLOBAL_SNAPSHOT_PAGE_SIZE)
+      .offset(snapshotOffset);
+    for (const row of rows) {
+      const day = row.snapshot.observedAt.toISOString().slice(0, 10);
+      const key = [row.snapshot.normalizedKeyword, row.snapshot.assetType, row.snapshot.locale, row.snapshot.category, day].join("\u001f");
+      const existing = latestPerWindow.get(key);
+      if (!existing || existing.observedAt < row.snapshot.observedAt) latestPerWindow.set(key, row.snapshot);
+    }
+    if (rows.length < GLOBAL_SNAPSHOT_PAGE_SIZE) break;
+    snapshotOffset += GLOBAL_SNAPSHOT_PAGE_SIZE;
   }
-  const snapshotRows = [...latestPerWindow.values()].map((row) => row.snapshot);
+  const snapshotRows = [...latestPerWindow.values()];
 
   const grouped = new Map<string, typeof snapshotRows>();
   for (const row of snapshotRows) {
@@ -316,24 +323,38 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
   if (options.assetType && options.assetType !== "all") assetConditions.push(eq(researchRuns.assetType, options.assetType));
   if (options.locale && options.locale !== "all") assetConditions.push(eq(researchRuns.locale, options.locale));
   if (options.category && options.category !== "all") assetConditions.push(eq(researchRuns.category, options.category));
-  const assetRows = await database.select({
-    snapshot: assetOpportunitySnapshots,
-    asset: assets,
-    locale: researchRuns.locale,
-    category: researchRuns.category,
-    runAssetType: researchRuns.assetType
-  }).from(assetOpportunitySnapshots)
-    .innerJoin(assets, eq(assetOpportunitySnapshots.assetId, assets.id))
-    .innerJoin(researchRuns, eq(assetOpportunitySnapshots.researchRunId, researchRuns.id))
-    .where(and(...assetConditions))
-    .orderBy(desc(assetOpportunitySnapshots.observedAt));
-  const effectiveAssets = new Map<string, (typeof assetRows)[number]>();
-  for (const row of assetRows) {
-    const day = row.snapshot.observedAt.toISOString().slice(0, 10);
-    const key = [row.asset.id, row.runAssetType, row.locale, row.category, day].join("\u001f");
-    if (!effectiveAssets.has(key)) effectiveAssets.set(key, row);
+  type GlobalAssetRow = {
+    snapshot: typeof assetOpportunitySnapshots.$inferSelect;
+    asset: typeof assets.$inferSelect;
+    locale: string;
+    category: string;
+    runAssetType: string;
+  };
+  const effectiveAssets = new Map<string, GlobalAssetRow>();
+  let assetOffset = 0;
+  while (true) {
+    const assetRows = await database.select({
+      snapshot: assetOpportunitySnapshots,
+      asset: assets,
+      locale: researchRuns.locale,
+      category: researchRuns.category,
+      runAssetType: researchRuns.assetType
+    }).from(assetOpportunitySnapshots)
+      .innerJoin(assets, eq(assetOpportunitySnapshots.assetId, assets.id))
+      .innerJoin(researchRuns, eq(assetOpportunitySnapshots.researchRunId, researchRuns.id))
+      .where(and(...assetConditions))
+      .orderBy(desc(assetOpportunitySnapshots.observedAt), asc(assetOpportunitySnapshots.id))
+      .limit(GLOBAL_SNAPSHOT_PAGE_SIZE)
+      .offset(assetOffset);
+    for (const row of assetRows) {
+      const day = row.snapshot.observedAt.toISOString().slice(0, 10);
+      const key = [row.asset.id, row.runAssetType, row.locale, row.category, day].join("\u001f");
+      if (!effectiveAssets.has(key)) effectiveAssets.set(key, row);
+    }
+    if (assetRows.length < GLOBAL_SNAPSHOT_PAGE_SIZE) break;
+    assetOffset += GLOBAL_SNAPSHOT_PAGE_SIZE;
   }
-  const assetsByScope = new Map<string, Array<(typeof assetRows)[number]>>();
+  const assetsByScope = new Map<string, GlobalAssetRow[]>();
   for (const row of effectiveAssets.values()) {
     const key = [row.asset.id, row.runAssetType, row.locale, row.category].join("\u001f");
     const current = assetsByScope.get(key) ?? [];
