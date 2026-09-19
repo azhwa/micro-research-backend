@@ -84,7 +84,13 @@ function promptForContext(context: unknown) {
   ].join("\n");
 }
 
-export async function generateWithUserGeminiKey(userId: string, model: string, context: unknown) {
+export async function generateStructuredWithUserGeminiKey(
+  userId: string,
+  model: string,
+  prompt: string,
+  responseSchema: unknown,
+  maxOutputTokens = 4_000
+) {
   const keys = await availableGeminiApiKeys(userId);
   if (!keys.length) {
     throw new Error("NO_GEMINI_API_KEY");
@@ -96,12 +102,12 @@ export async function generateWithUserGeminiKey(userId: string, model: string, c
       const client = new GoogleGenAI({ apiKey: key.value });
       const response = await client.models.generateContent({
         model,
-        contents: promptForContext(context),
+        contents: prompt,
         config: {
           temperature: 0.3,
-          maxOutputTokens: 4_000,
+          maxOutputTokens,
           responseMimeType: "application/json",
-          responseSchema: recommendationSchema
+          responseSchema
         }
       });
       const parsed = parseResponse(response.text);
@@ -116,6 +122,16 @@ export async function generateWithUserGeminiKey(userId: string, model: string, c
   }
 
   throw new Error(lastReason);
+}
+
+export async function generateWithUserGeminiKey(userId: string, model: string, context: unknown) {
+  return generateStructuredWithUserGeminiKey(
+    userId,
+    model,
+    promptForContext(context),
+    recommendationSchema,
+    4_000
+  );
 }
 
 export async function testUserGeminiKey(userId: string, model = DEFAULT_GEMINI_MODEL, keyId?: string) {

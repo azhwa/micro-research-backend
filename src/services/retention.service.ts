@@ -12,6 +12,7 @@ import {
 import { getDatabase, isDatabaseConfigured } from "../db/client";
 import { deleteResearchRun } from "./research.service";
 import { pruneResearchDetailLogs } from "./research-log.service";
+import { invalidateGlobalInsightsCache } from "./snapshot.service";
 
 export const RETENTION_POLICY = {
   rawDataDays: 30,
@@ -95,6 +96,7 @@ export async function runRetentionCleanup() {
         orphanedAssets += result.orphanedAssets;
       }
     }
+    if (deletedRuns > 0) await invalidateGlobalInsightsCache();
 
     return {
       skipped: false,

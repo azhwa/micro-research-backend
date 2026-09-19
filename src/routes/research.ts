@@ -18,6 +18,7 @@ import {
   type ResearchMode
 } from "../services/research.service";
 import { listResearchDetailLogs } from "../services/research-log.service";
+import { invalidateGlobalInsightsCache } from "../services/snapshot.service";
 import { env } from "../config/env";
 
 interface CreateResearchBody {
@@ -116,6 +117,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       try {
         const result = await deleteResearchRun(request.params.id, request.auth);
         if (!result) return reply.status(404).send({ error: "RESEARCH_NOT_FOUND" });
+        await invalidateGlobalInsightsCache();
         return result;
       } catch (error) {
         if (error instanceof Error && error.name === "RESEARCH_ACTIVE") {

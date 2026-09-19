@@ -4,6 +4,7 @@ import { researchWorker } from "./jobs/research.worker";
 import { RETENTION_POLICY, runRetentionCleanup } from "./services/retention.service";
 import { isR2BackupConfigured, runDatabaseBackup } from "./services/backup.service";
 import { initializeLocalDatabase } from "./db/client";
+import { seedDiscoveryWorker } from "./jobs/seed-discovery.worker";
 
 const RETENTION_INTERVAL_MS = RETENTION_POLICY.intervalHours * 60 * 60 * 1_000;
 const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
@@ -18,6 +19,7 @@ async function start(): Promise<void> {
       port: env.port
     });
     researchWorker.start();
+    seedDiscoveryWorker.start();
     const cleanup = async () => {
       try {
         const result = await runRetentionCleanup();

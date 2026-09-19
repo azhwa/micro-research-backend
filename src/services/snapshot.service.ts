@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import {
   assetOpportunitySnapshots,
   assets,
+  globalInsightsCache,
   keywordOpportunitySnapshots,
   researchRuns
 } from "../db/schema";
@@ -20,7 +21,9 @@ import type { AuthContext } from "../auth";
 
 const SNAPSHOT_KEYWORD_LIMIT = 500;
 const GLOBAL_SNAPSHOT_PAGE_SIZE = 500;
+const GLOBAL_CACHE_TTL_MS = 15 * 60 * 1000;
 let backfillPromise: Promise<void> | null = null;
+const globalCacheBuilds = new Map<string, Promise<GlobalInsights>>();
 
 function chunk<T>(items: T[], size: number) {
   const chunks: T[][] = [];
@@ -106,6 +109,7 @@ export async function persistResearchSnapshots(researchRunId: string) {
     });
   }
 
+  await invalidateGlobalInsightsCache();
   return { keywords: keywordRows.length, assets: assetRows.length };
 }
 
@@ -213,8 +217,7 @@ export interface GlobalAssetInsight {
   lastObservedAt: Date;
 }
 
-export async function getGlobalInsights(options: { assetType?: string; locale?: string; category?: string; limit?: number } = {}, auth?: AuthContext | null) {
-  await ensureSnapshotBackfill();
+async function computeGlobalInsights(options: { assetType?: string; locale?: string; category?: string; limit?: number } = {}, auth?: AuthContext | null) {
   const database = getDatabase();
   const conditions = [];
   conditions.push(eq(keywordOpportunitySnapshots.scoringVersion, SCORING_VERSION));
@@ -397,6 +400,94 @@ export async function getGlobalInsights(options: { assetType?: string; locale?: 
     keywords: keywords.slice(0, limit),
     assets: globalAssets.slice(0, limit)
   } satisfies GlobalInsights;
+}
+
+function globalCacheId(options: { assetType?: string; locale?: string; category?: string }, auth?: AuthContext | null) {
+  const scope = !auth || auth.isDevBypass
+    ? "all"
+    : auth.organizationId
+      ? `organization:${auth.organizationId}`
+      : `user:${auth.userId}`;
+  return makeStableId(
+    "global-insights-cache",
+    SCORING_VERSION,
+    scope,
+    options.assetType ?? "all",
+    options.locale ?? "all",
+    options.category ?? "all"
+  );
+}
+
+function hydrateGlobalInsights(value: GlobalInsights): GlobalInsights {
+  return {
+    ...value,
+    keywords: value.keywords.map((item) => ({
+      ...item,
+      firstObservedAt: new Date(item.firstObservedAt),
+      lastObservedAt: new Date(item.lastObservedAt)
+    })),
+    assets: value.assets.map((item) => ({
+      ...item,
+      firstObservedAt: new Date(item.firstObservedAt),
+      lastObservedAt: new Date(item.lastObservedAt)
+    }))
+  };
+}
+
+function limitGlobalInsights(result: GlobalInsights, requestedLimit?: number): GlobalInsights {
+  const limit = Math.min(Math.max(requestedLimit ?? 50, 1), 200);
+  return { ...result, keywords: result.keywords.slice(0, limit), assets: result.assets.slice(0, limit) };
+}
+
+export async function invalidateGlobalInsightsCache() {
+  const database = getDatabase();
+  await database.delete(globalInsightsCache).where(eq(globalInsightsCache.scoringVersion, SCORING_VERSION));
+}
+
+export async function getGlobalInsights(options: { assetType?: string; locale?: string; category?: string; limit?: number } = {}, auth?: AuthContext | null) {
+  await ensureSnapshotBackfill();
+  const database = getDatabase();
+  const cacheOptions = {
+    assetType: options.assetType ?? "all",
+    locale: options.locale ?? "all",
+    category: options.category ?? "all"
+  };
+  const id = globalCacheId(cacheOptions, auth);
+  const cached = await database
+    .select({ payloadJson: globalInsightsCache.payloadJson, generatedAt: globalInsightsCache.generatedAt })
+    .from(globalInsightsCache)
+    .where(and(eq(globalInsightsCache.id, id), eq(globalInsightsCache.scoringVersion, SCORING_VERSION)))
+    .limit(1);
+  const cachedRow = cached[0];
+  if (cachedRow && Date.now() - cachedRow.generatedAt.getTime() < GLOBAL_CACHE_TTL_MS) {
+    const result = hydrateGlobalInsights(JSON.parse(cachedRow.payloadJson) as GlobalInsights);
+    return limitGlobalInsights(result, options.limit);
+  }
+
+  const pending = globalCacheBuilds.get(id);
+  if (pending) return limitGlobalInsights(await pending, options.limit);
+  const build = (async () => {
+    const result = await computeGlobalInsights({ ...options, limit: 200 }, auth);
+    await database.insert(globalInsightsCache).values({
+      id,
+      ownerUserId: auth && !auth.isDevBypass && !auth.organizationId ? auth.userId : null,
+      organizationId: auth && !auth.isDevBypass ? auth.organizationId ?? null : null,
+      scoringVersion: SCORING_VERSION,
+      payloadJson: JSON.stringify(result),
+      generatedAt: new Date()
+    }).onConflictDoUpdate({
+      target: globalInsightsCache.id,
+      set: {
+        payloadJson: sql`excluded.payload_json`,
+        generatedAt: sql`excluded.generated_at`,
+        updatedAt: sql`excluded.updated_at`
+      }
+    });
+    return result;
+  })().finally(() => { globalCacheBuilds.delete(id); });
+  globalCacheBuilds.set(id, build);
+  const result = await build;
+  return limitGlobalInsights(result, options.limit);
 }
 
 export async function getGlobalAiContext(options: { assetType?: string; locale?: string; category?: string } = {}, auth?: AuthContext | null) {

@@ -47,7 +47,9 @@ export const researchRuns = sqliteTable(
   (table) => [
     index("research_runs_status_idx").on(table.status),
     index("research_runs_owner_idx").on(table.ownerUserId),
-    index("research_runs_org_idx").on(table.organizationId)
+    index("research_runs_org_idx").on(table.organizationId),
+    index("research_runs_owner_status_idx").on(table.ownerUserId, table.status, table.completedAt),
+    index("research_runs_org_status_idx").on(table.organizationId, table.status, table.completedAt)
   ]
 );
 
@@ -192,6 +194,7 @@ export const assetObservations = sqliteTable(
   (table) => [
     index("asset_observations_run_idx").on(table.researchRunId),
     index("asset_observations_asset_idx").on(table.assetId),
+    index("asset_observations_run_sort_rank_idx").on(table.researchRunId, table.sortMode, table.rank),
     uniqueIndex("asset_observations_unique_idx").on(
       table.researchRunId,
       table.assetId,
@@ -220,6 +223,7 @@ export const assetKeywords = sqliteTable(
   (table) => [
     index("asset_keywords_run_idx").on(table.researchRunId),
     index("asset_keywords_keyword_idx").on(table.normalizedKeyword),
+    index("asset_keywords_run_asset_position_idx").on(table.researchRunId, table.assetId, table.position),
     uniqueIndex("asset_keywords_unique_idx").on(
       table.researchRunId,
       table.assetId,
@@ -265,6 +269,8 @@ export const keywordOpportunitySnapshots = sqliteTable(
     index("keyword_snapshots_run_idx").on(table.researchRunId),
     index("keyword_snapshots_score_idx").on(table.opportunityScore),
     index("keyword_snapshots_version_status_idx").on(table.scoringVersion, table.scoreStatus),
+    index("keyword_snapshots_version_status_observed_idx").on(table.scoringVersion, table.scoreStatus, table.observedAt),
+    index("keyword_snapshots_run_observed_idx").on(table.researchRunId, table.observedAt),
     uniqueIndex("keyword_snapshots_unique_idx").on(
       table.researchRunId,
       table.normalizedKeyword,
@@ -298,7 +304,27 @@ export const assetOpportunitySnapshots = sqliteTable(
     index("asset_snapshots_run_idx").on(table.researchRunId),
     index("asset_snapshots_asset_idx").on(table.assetId),
     index("asset_snapshots_version_status_idx").on(table.scoringVersion, table.scoreStatus),
+    index("asset_snapshots_version_status_observed_idx").on(table.scoringVersion, table.scoreStatus, table.observedAt),
+    index("asset_snapshots_run_observed_idx").on(table.researchRunId, table.observedAt),
     uniqueIndex("asset_snapshots_unique_idx").on(table.researchRunId, table.assetId)
+  ]
+);
+
+export const globalInsightsCache = sqliteTable(
+  "global_insights_cache",
+  {
+    id: text("id").primaryKey(),
+    ownerUserId: text("owner_user_id"),
+    organizationId: text("organization_id"),
+    scoringVersion: text("scoring_version").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    generatedAt: integer("generated_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("global_insights_cache_owner_idx").on(table.ownerUserId),
+    index("global_insights_cache_org_idx").on(table.organizationId),
+    index("global_insights_cache_version_idx").on(table.scoringVersion)
   ]
 );
 
@@ -323,6 +349,64 @@ export const aiRecommendations = sqliteTable(
     index("ai_recommendations_run_idx").on(table.researchRunId),
     index("ai_recommendations_status_idx").on(table.status),
     uniqueIndex("ai_recommendations_input_idx").on(table.inputHash)
+  ]
+);
+
+export const seedDiscoveryJobs = sqliteTable(
+  "seed_discovery_jobs",
+  {
+    id: text("id").primaryKey(),
+    ownerUserId: text("owner_user_id").notNull(),
+    organizationId: text("organization_id"),
+    topic: text("topic").notNull().default(""),
+    category: text("category").notNull().default("general"),
+    assetType: text("asset_type").notNull().default("images"),
+    locale: text("locale").notNull().default("en-GB"),
+    requestedCount: integer("requested_count").notNull().default(10),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    inputHash: text("input_hash").notNull(),
+    contextJson: text("context_json").notNull(),
+    status: text("status").notNull().default("pending"),
+    progressTotal: integer("progress_total").notNull().default(1),
+    progressCompleted: integer("progress_completed").notNull().default(0),
+    summary: text("summary").notNull().default(""),
+    cautionsJson: text("cautions_json").notNull().default("[]"),
+    errorMessage: text("error_message"),
+    createdAt: createdAt(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("seed_discovery_jobs_owner_idx").on(table.ownerUserId),
+    index("seed_discovery_jobs_status_idx").on(table.status, table.createdAt),
+    uniqueIndex("seed_discovery_jobs_input_idx").on(table.inputHash)
+  ]
+);
+
+export const seedDiscoveryCandidates = sqliteTable(
+  "seed_discovery_candidates",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => seedDiscoveryJobs.id, { onDelete: "cascade" }),
+    keyword: text("keyword").notNull(),
+    normalizedKeyword: text("normalized_keyword").notNull(),
+    source: text("source").notNull(),
+    opportunityScore: real("opportunity_score"),
+    confidence: text("confidence").notNull().default("low"),
+    evidenceJson: text("evidence_json").notNull().default("[]"),
+    rationale: text("rationale").notNull().default(""),
+    promptAnglesJson: text("prompt_angles_json").notNull().default("[]"),
+    rank: integer("rank").notNull().default(0),
+    createdAt: createdAt()
+  },
+  (table) => [
+    index("seed_discovery_candidates_job_idx").on(table.jobId),
+    index("seed_discovery_candidates_keyword_idx").on(table.normalizedKeyword),
+    uniqueIndex("seed_discovery_candidates_unique_idx").on(table.jobId, table.normalizedKeyword)
   ]
 );
 
