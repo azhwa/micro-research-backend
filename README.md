@@ -9,7 +9,16 @@ npm install
 npm run dev
 ```
 
-Buat file `.env` dari `.env.example`, lalu isi konfigurasi Turso, Clerk, dan `GEMINI_ENCRYPTION_KEY`.
+Buat file `.env` dari `.env.example`, lalu isi konfigurasi Turso, login pribadi, dan `GEMINI_ENCRYPTION_KEY`.
+
+Untuk membuat hash password login:
+
+```bash
+npm run auth:hash -- 'password-anda'
+```
+
+Masukkan hasilnya ke `AUTH_PASSWORD_HASH`, lalu isi `AUTH_USERNAME` dan buat nilai acak panjang untuk `AUTH_SESSION_SECRET`.
+Login menggunakan HttpOnly session cookie; Clerk tidak diperlukan.
 
 ## Validasi dan build
 

@@ -55,7 +55,7 @@ function publicKey(row: typeof geminiApiKeys.$inferSelect) {
 
 export async function listGeminiApiKeys(userId: string) {
   const rows = await getDatabase().select().from(geminiApiKeys)
-    .where(eq(geminiApiKeys.ownerClerkUserId, userId))
+    .where(eq(geminiApiKeys.ownerUserId, userId))
     .orderBy(asc(geminiApiKeys.createdAt));
   return rows.map(publicKey);
 }
@@ -66,7 +66,7 @@ export async function createGeminiApiKey(userId: string, label: string, value: s
   const now = new Date();
   const [row] = await getDatabase().insert(geminiApiKeys).values({
     id: `gkey_${randomUUID()}`,
-    ownerClerkUserId: userId,
+    ownerUserId: userId,
     label: cleanLabel,
     encryptedKey: encrypt(key),
     keyHint: key.slice(-4),
@@ -79,14 +79,14 @@ export async function createGeminiApiKey(userId: string, label: string, value: s
 
 export async function deleteGeminiApiKey(userId: string, id: string) {
   const result = await getDatabase().delete(geminiApiKeys)
-    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerClerkUserId, userId)));
+    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerUserId, userId)));
   return result.rowsAffected > 0;
 }
 
 export async function setGeminiApiKeyStatus(userId: string, id: string, status: "active" | "disabled") {
   const [row] = await getDatabase().update(geminiApiKeys)
     .set({ status, updatedAt: new Date() })
-    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerClerkUserId, userId)))
+    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerUserId, userId)))
     .returning();
   return row ? publicKey(row) : null;
 }
@@ -95,7 +95,7 @@ export async function availableGeminiApiKeys(userId: string) {
   const now = new Date();
   const rows = await getDatabase().select().from(geminiApiKeys)
     .where(and(
-      eq(geminiApiKeys.ownerClerkUserId, userId),
+      eq(geminiApiKeys.ownerUserId, userId),
       eq(geminiApiKeys.status, "active"),
       or(isNull(geminiApiKeys.cooldownUntil), lt(geminiApiKeys.cooldownUntil, now))
     ))
@@ -105,7 +105,7 @@ export async function availableGeminiApiKeys(userId: string) {
 
 export async function getGeminiApiKey(userId: string, id: string) {
   const [row] = await getDatabase().select().from(geminiApiKeys)
-    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerClerkUserId, userId)))
+    .where(and(eq(geminiApiKeys.id, id), eq(geminiApiKeys.ownerUserId, userId)))
     .limit(1);
   return row ? { id: row.id, value: decrypt(row.encryptedKey) } : null;
 }

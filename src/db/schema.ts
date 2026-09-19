@@ -28,7 +28,7 @@ export const researchRuns = sqliteTable(
     id: text("id").primaryKey(),
     seedKeyword: text("seed_keyword").notNull(),
     category: text("category").notNull().default("general"),
-    ownerClerkUserId: text("owner_clerk_user_id"),
+    ownerUserId: text("owner_clerk_user_id"),
     organizationId: text("organization_id"),
     assetType: text("asset_type").notNull().default("images"),
     locale: text("locale").notNull().default("en-US"),
@@ -46,7 +46,7 @@ export const researchRuns = sqliteTable(
   },
   (table) => [
     index("research_runs_status_idx").on(table.status),
-    index("research_runs_owner_idx").on(table.ownerClerkUserId),
+    index("research_runs_owner_idx").on(table.ownerUserId),
     index("research_runs_org_idx").on(table.organizationId)
   ]
 );
@@ -330,7 +330,7 @@ export const geminiApiKeys = sqliteTable(
   "gemini_api_keys",
   {
     id: text("id").primaryKey(),
-    ownerClerkUserId: text("owner_clerk_user_id").notNull(),
+    ownerUserId: text("owner_clerk_user_id").notNull(),
     label: text("label").notNull(),
     encryptedKey: text("encrypted_key").notNull(),
     keyHint: text("key_hint").notNull(),
@@ -343,7 +343,7 @@ export const geminiApiKeys = sqliteTable(
     updatedAt: updatedAt()
   },
   (table) => [
-    index("gemini_keys_owner_idx").on(table.ownerClerkUserId),
+    index("gemini_keys_owner_idx").on(table.ownerUserId),
     index("gemini_keys_status_idx").on(table.status)
   ]
 );
@@ -352,7 +352,7 @@ export const proxyEndpoints = sqliteTable(
   "proxy_endpoints",
   {
     id: text("id").primaryKey(),
-    createdByClerkUserId: text("created_by_clerk_user_id").notNull(),
+    createdByUserId: text("created_by_clerk_user_id").notNull(),
     label: text("label").notNull(),
     encryptedUrl: text("encrypted_url").notNull(),
     displayUrl: text("display_url").notNull(),

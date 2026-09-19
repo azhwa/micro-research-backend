@@ -33,22 +33,20 @@ export const env = {
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
   tursoDatabaseUrl: process.env.TURSO_DATABASE_URL ?? "",
   tursoAuthToken: process.env.TURSO_AUTH_TOKEN ?? "",
-  clerkSecretKey: process.env.CLERK_SECRET_KEY ?? "",
-  clerkJwtKey: (process.env.CLERK_JWT_KEY ?? "").replace(/\\n/g, "\n"),
-  clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY ?? "",
-  clerkAuthorizedParties: (process.env.CLERK_AUTHORIZED_PARTIES ?? process.env.FRONTEND_ORIGIN ?? "")
-    .split(",").map((value) => value.trim()).filter(Boolean),
-  clerkAudience: process.env.CLERK_JWT_AUDIENCE ?? "",
+  authUsername: process.env.AUTH_USERNAME ?? "",
+  authUserId: process.env.AUTH_USER_ID ?? "local-user",
+  authPasswordHash: process.env.AUTH_PASSWORD_HASH ?? "",
+  authSessionSecret: process.env.AUTH_SESSION_SECRET ?? "",
+  authSessionTtlHours: parsePositiveInteger(process.env.AUTH_SESSION_TTL_HOURS, 168, 24 * 365),
   geminiEncryptionKey: process.env.GEMINI_ENCRYPTION_KEY ?? ""
 } as const;
 
-export const clerkConfigured = Boolean(
-  env.clerkPublishableKey && (env.clerkSecretKey || env.clerkJwtKey)
+export const authConfigured = Boolean(
+  env.authUsername && env.authPasswordHash && env.authSessionSecret
 );
-export const authRequired = env.nodeEnv === "production" || clerkConfigured;
 
-if (env.nodeEnv === "production" && !clerkConfigured) {
+if (env.nodeEnv === "production" && !authConfigured) {
   throw new Error(
-    "Production membutuhkan CLERK_PUBLISHABLE_KEY dan salah satu CLERK_SECRET_KEY atau CLERK_JWT_KEY"
+    "Production membutuhkan AUTH_USERNAME, AUTH_PASSWORD_HASH, dan AUTH_SESSION_SECRET"
   );
 }

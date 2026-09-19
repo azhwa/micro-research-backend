@@ -105,7 +105,7 @@ export async function createProxyEndpoint(userId: string, label: string, value: 
   const now = new Date();
   const [row] = await getDatabase().insert(proxyEndpoints).values({
     id: `proxy_${randomUUID()}`,
-    createdByClerkUserId: userId,
+    createdByUserId: userId,
     label: label.trim().slice(0, 80) || "Proxy",
     encryptedUrl: encrypt(proxyUrl),
     displayUrl,

@@ -24,7 +24,7 @@ export type ResearchMode = "fast" | "full" | "primary";
 export interface CreateResearchInput {
   keyword: string;
   category: string;
-  ownerClerkUserId?: string | null;
+  ownerUserId?: string | null;
   organizationId?: string | null;
   assetType: AssetType;
   locale: string;
@@ -38,7 +38,7 @@ export function researchScopeCondition(auth?: AuthContext | null): SQL | undefin
   if (!auth || auth.isDevBypass) return undefined;
   return auth.organizationId
     ? eq(researchRuns.organizationId, auth.organizationId)
-    : eq(researchRuns.ownerClerkUserId, auth.userId);
+    : eq(researchRuns.ownerUserId, auth.userId);
 }
 
 function stableId(...parts: string[]): string {
@@ -57,7 +57,7 @@ export async function createResearchRun(input: CreateResearchInput) {
     id: runId,
     seedKeyword: input.keyword,
     category: input.category,
-    ownerClerkUserId: input.ownerClerkUserId ?? null,
+    ownerUserId: input.ownerUserId ?? null,
     organizationId: input.organizationId ?? null,
     assetType: input.assetType,
     locale: input.locale,

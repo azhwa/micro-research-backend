@@ -13,7 +13,7 @@ import { researchRoutes } from "./routes/research";
 import { geminiRoutes } from "./routes/gemini";
 import { proxyRoutes } from "./routes/proxies";
 import { authenticateRequest } from "./auth";
-import { clerkConfigured, env } from "./config/env";
+import { authConfigured, env } from "./config/env";
 
 export function buildApp() {
   const app = Fastify({
@@ -24,6 +24,7 @@ export function buildApp() {
     origin: env.frontendOrigin,
     methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
     maxAge: 600
   });
   app.register(helmet);
@@ -34,15 +35,17 @@ export function buildApp() {
   });
 
   app.addHook("onRequest", async (request, reply) => {
-    const publicPath = request.url.startsWith("/api/health");
+    const publicPath = request.url.startsWith("/api/health") ||
+      request.url.startsWith("/api/auth/login") ||
+      request.url.startsWith("/api/auth/logout");
     if (publicPath) {
       request.auth = null;
       return;
     }
     const auth = await authenticateRequest(request);
     if (!auth) {
-      return reply.status(clerkConfigured || env.nodeEnv === "production" ? 401 : 503).send({
-        error: clerkConfigured || env.nodeEnv === "production" ? "UNAUTHORIZED" : "AUTH_NOT_CONFIGURED"
+      return reply.status(authConfigured || env.nodeEnv === "production" ? 401 : 503).send({
+        error: authConfigured || env.nodeEnv === "production" ? "UNAUTHORIZED" : "AUTH_NOT_CONFIGURED"
       });
     }
     request.auth = auth;

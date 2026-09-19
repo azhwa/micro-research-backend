@@ -18,6 +18,7 @@ import {
   type ResearchMode
 } from "../services/research.service";
 import { listResearchDetailLogs } from "../services/research-log.service";
+import { env } from "../config/env";
 
 interface CreateResearchBody {
   keyword?: unknown;
@@ -74,7 +75,7 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       const result = await createResearchRun({
         keyword,
         category,
-        ownerClerkUserId: request.auth?.isDevBypass ? null : request.auth?.userId,
+        ownerUserId: request.auth?.isDevBypass ? null : request.auth?.userId,
         organizationId: request.auth?.isDevBypass ? null : request.auth?.organizationId,
         assetType: assetType as AssetType,
         locale,
@@ -207,6 +208,85 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
         request.params.id,
         Number.isFinite(limit) ? limit : 100
       );
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/research-runs/:id/stream",
+    async (request, reply) => {
+      const initialRun = await getResearchRun(request.params.id, request.auth);
+      if (!initialRun) return reply.status(404).send({ error: "RESEARCH_NOT_FOUND" });
+
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+        "access-control-allow-origin": env.frontendOrigin,
+        "access-control-allow-credentials": "true"
+      });
+
+      let closed = false;
+      let lastState = "";
+      let pollTimer: NodeJS.Timeout | undefined;
+      let keepAliveTimer: NodeJS.Timeout | undefined;
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        if (pollTimer) clearInterval(pollTimer);
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        request.raw.off("close", cleanup);
+      };
+
+      const send = (event: string, payload: unknown) => {
+        if (closed || reply.raw.destroyed) return;
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+      };
+
+      const emitSnapshot = async (force = false) => {
+        if (closed) return;
+        try {
+          const run = await getResearchRun(request.params.id, request.auth);
+          if (!run) {
+            send("error", { error: "RESEARCH_NOT_FOUND" });
+            cleanup();
+            reply.raw.end();
+            return;
+          }
+
+          const state = [
+            run.status,
+            run.progressCompleted,
+            run.errorMessage ?? "",
+            run.completedAt?.getTime() ?? ""
+          ].join("|");
+          if (!force && state === lastState) return;
+          lastState = state;
+
+          const [events, detailLogs] = await Promise.all([
+            listResearchEvents(request.params.id, 100),
+            listResearchDetailLogs(request.params.id, 100)
+          ]);
+          send("snapshot", { run, events, detailLogs });
+
+          if (["completed", "failed", "partial", "cancelled"].includes(run.status)) {
+            send("complete", { status: run.status });
+            cleanup();
+            reply.raw.end();
+          }
+        } catch (error) {
+          request.log.warn({ err: error, researchRunId: request.params.id }, "Research SSE update failed");
+        }
+      };
+
+      request.raw.on("close", cleanup);
+      keepAliveTimer = setInterval(() => {
+        if (!closed && !reply.raw.destroyed) reply.raw.write(": keep-alive\n\n");
+      }, 15_000);
+      pollTimer = setInterval(() => { void emitSnapshot(); }, 2_000);
+      void emitSnapshot(true);
     }
   );
 
