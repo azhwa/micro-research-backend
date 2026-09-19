@@ -44,6 +44,10 @@ import {
   ResearchCancelledError,
   throwIfResearchCancelled
 } from "../services/research-cancellation";
+import {
+  appendResearchAssetBatchLog,
+  appendResearchKeywordSummaryLog
+} from "../services/research-log.service";
 
 export { applyStealthScripts } from "./adobe-stock.core";
 
@@ -358,6 +362,12 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             run.assetsPerQuery,
             searchResult.assets
           );
+          void appendResearchAssetBatchLog(
+            researchRunId,
+            suggestion.suggestion,
+            sortMode,
+            searchResult.assets
+          );
           resumeState.completedKeys.add(queryKey);
 
           completed += 1;
@@ -396,6 +406,18 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
               }
             );
           }
+          void appendResearchKeywordSummaryLog(
+            researchRunId,
+            suggestion.suggestion,
+            sortMode,
+            {
+              selected: enrichment.selected,
+              fetched: enrichment.fetched,
+              success: keywordSuccess,
+              empty: keywordEmpty,
+              failed: keywordFailed
+            }
+          );
 
           await randomJitter(700, 1800);
           await ensureResearchActive();

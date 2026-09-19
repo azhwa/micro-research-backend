@@ -11,6 +11,7 @@ import {
 } from "../db/schema";
 import { getDatabase, isDatabaseConfigured } from "../db/client";
 import { deleteResearchRun } from "./research.service";
+import { pruneResearchDetailLogs } from "./research-log.service";
 
 export const RETENTION_POLICY = {
   rawDataDays: 30,
@@ -78,6 +79,7 @@ export async function runRetentionCleanup() {
   try {
     const database = getDatabase();
     const deletedEvents = (await database.delete(researchEvents).where(lt(researchEvents.createdAt, cutoffDate(RETENTION_POLICY.eventDays)))).rowsAffected ?? 0;
+    const deletedDetailLogs = await pruneResearchDetailLogs(cutoffDate(RETENTION_POLICY.rawDataDays));
     const raw = await pruneRawData(database, cutoffDate(RETENTION_POLICY.rawDataDays));
 
     const oldRuns = await database
@@ -97,6 +99,7 @@ export async function runRetentionCleanup() {
     return {
       skipped: false,
       deletedEvents,
+      deletedDetailLogs,
       ...raw,
       deletedRuns,
       orphanedAssets
@@ -105,4 +108,3 @@ export async function runRetentionCleanup() {
     cleanupRunning = false;
   }
 }
-

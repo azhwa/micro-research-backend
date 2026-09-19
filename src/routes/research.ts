@@ -17,6 +17,7 @@ import {
   type AssetType,
   type ResearchMode
 } from "../services/research.service";
+import { listResearchDetailLogs } from "../services/research-log.service";
 
 interface CreateResearchBody {
   keyword?: unknown;
@@ -189,6 +190,23 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
 
       const limit = Number(request.query.limit ?? 100);
       return listResearchEvents(request.params.id, Number.isFinite(limit) ? limit : 100);
+    }
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    "/api/research-runs/:id/detail-log",
+    async (request, reply) => {
+      const run = await getResearchRun(request.params.id, request.auth);
+
+      if (!run) {
+        return reply.status(404).send({ error: "RESEARCH_NOT_FOUND" });
+      }
+
+      const limit = Number(request.query.limit ?? 100);
+      return listResearchDetailLogs(
+        request.params.id,
+        Number.isFinite(limit) ? limit : 100
+      );
     }
   );
 

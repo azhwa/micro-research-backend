@@ -9,6 +9,7 @@ import {
   registerResearchCancellation,
   unregisterResearchCancellation
 } from "../services/research-cancellation";
+import { flushResearchDetailLog } from "../services/research-log.service";
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ATTEMPTS = 3;
@@ -220,6 +221,7 @@ class ResearchWorker {
           .where(eq(researchJobs.id, job.id));
       }
     } finally {
+      await flushResearchDetailLog(job.researchRunId);
       unregisterResearchCancellation(job.researchRunId, cancellationController);
     }
   }

@@ -16,6 +16,7 @@ import {
 import { getDatabase } from "../db/client";
 import type { AuthContext } from "../auth";
 import { requestResearchCancellation } from "./research-cancellation";
+import { deleteResearchDetailLog } from "./research-log.service";
 
 export type AssetType = "images" | "videos";
 export type ResearchMode = "fast" | "full" | "primary";
@@ -152,6 +153,7 @@ export async function deleteResearchRun(id: string, auth?: AuthContext | null) {
   await database.delete(aiRecommendations).where(eq(aiRecommendations.researchRunId, id));
   await database.delete(researchJobs).where(eq(researchJobs.researchRunId, id));
   await database.delete(researchRuns).where(eq(researchRuns.id, id));
+  await deleteResearchDetailLog(id);
 
   // Assets are shared across runs. Remove only assets that no longer have any reference.
   let orphanedAssets = 0;
