@@ -1,5 +1,5 @@
 import { PlaywrightCrawler } from "crawlee";
-import { chromium, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { eq } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { researchRuns } from "../db/schema";
@@ -385,8 +385,9 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         `Browser crawler: external CDP (${env.playwrightCdpUrl})`,
         { cdpUrl: env.playwrightCdpUrl }
       );
+      let browser: Browser | null = null;
       try {
-        const browser = await chromium.connectOverCDP(env.playwrightCdpUrl);
+        browser = await chromium.connectOverCDP(env.playwrightCdpUrl);
         const context = browser.contexts()[0] || (await browser.newContext({
           viewport: { width: 1920, height: 1080 }
         }));
@@ -415,6 +416,11 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           );
         }
         throw error;
+      } finally {
+        // Disconnect Playwright after each request. For a CDP-connected
+        // browser, close() clears Playwright-owned contexts and disconnects;
+        // it does not stop the external Chromium process managed by systemd.
+        await browser?.close().catch(() => undefined);
       }
       return;
     }
