@@ -14,6 +14,7 @@
     "test:stealth": "tsx src/crawlers/stealth.test.ts",
     "auth:hash": "tsx src/scripts/hash-password.ts",
     "db:backup": "tsx src/scripts/backup-database.ts",
+    "db:migrate-local": "tsx src/scripts/migrate-turso-to-local.ts",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },

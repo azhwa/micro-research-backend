@@ -23,6 +23,14 @@ function parsePositiveInteger(value: string | undefined, fallback: number, max =
   return Math.min(parsed, max);
 }
 
+function parseDatabaseDriver(value: string | undefined): "local" | "turso" {
+  const driver = value?.trim().toLowerCase() ?? "turso";
+  if (driver !== "local" && driver !== "turso") {
+    throw new Error("DATABASE_DRIVER harus bernilai local atau turso");
+  }
+  return driver;
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parsePort(process.env.PORT),
@@ -33,6 +41,8 @@ export const env = {
   researchTimeoutMs: parsePositiveInteger(process.env.RESEARCH_TIMEOUT_MINUTES, 45, 180) * 60_000,
   workerConcurrency: parsePositiveInteger(process.env.WORKER_CONCURRENCY, 1, 10),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
+  databaseDriver: parseDatabaseDriver(process.env.DATABASE_DRIVER),
+  localDatabasePath: process.env.LOCAL_DATABASE_PATH?.trim() || "storage/micro-research.sqlite",
   tursoDatabaseUrl: process.env.TURSO_DATABASE_URL ?? "",
   tursoAuthToken: process.env.TURSO_AUTH_TOKEN ?? "",
   authUsername: process.env.AUTH_USERNAME ?? "",

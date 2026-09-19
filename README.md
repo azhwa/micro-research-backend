@@ -55,6 +55,14 @@ Backup menggunakan logical SQLite dump yang dikompresi gzip. Setiap backup berha
 
 Isi `R2_*` dan aktifkan `BACKUP_ENABLED=true` di server. Gunakan token R2 khusus bucket backup, dan jangan beri token aplikasi izin mengubah bucket lock. Service melakukan pengecekan setiap jam, tetapi hanya membuat snapshot baru jika salinan `latest` sudah lebih tua dari `BACKUP_INTERVAL_HOURS`.
 
+Untuk migrasi database utama dari Turso ke SQLite lokal, biarkan `DATABASE_DRIVER=turso`, hentikan proses backend, lalu jalankan:
+
+```bash
+npm run db:migrate-local
+```
+
+Jika hasil `integrityCheck` adalah `ok`, ubah `DATABASE_DRIVER=local`, lalu build dan restart PM2. File SQLite berada di `LOCAL_DATABASE_PATH` dan wajib berada pada storage persistent.
+
 Untuk backup manual:
 
 ```bash

@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/client-s3";
 import type { Row } from "@libsql/client";
 import { env } from "../config/env";
-import { isDatabaseConfigured, tursoClient } from "../db/client";
+import { isDatabaseConfigured, primaryClient } from "../db/client";
 
 const TEMP_ROOT = path.resolve(process.cwd(), "storage", "database-backups-tmp");
 
@@ -104,7 +104,7 @@ async function sha256File(filePath: string): Promise<string> {
 }
 
 async function dumpDatabase(): Promise<DumpResult> {
-  if (!tursoClient) throw new Error("Turso belum dikonfigurasi");
+  if (!primaryClient) throw new Error("Database utama belum dikonfigurasi");
 
   await fs.mkdir(TEMP_ROOT, { recursive: true });
   const generatedAt = new Date().toISOString();
@@ -117,7 +117,7 @@ async function dumpDatabase(): Promise<DumpResult> {
 
   let tableCount = 0;
   let rowCount = 0;
-  const transaction = await tursoClient.transaction("read");
+  const transaction = await primaryClient.transaction("read");
 
   try {
     await writeChunk(output, "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n\n");
