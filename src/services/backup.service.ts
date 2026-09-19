@@ -139,6 +139,14 @@ async function dumpDatabase(): Promise<DumpResult> {
     const tableRows = schemaResult.rows.filter((row) => String(readRowValue(row, "type", 0)) === "table");
     tableCount = tableRows.length;
 
+    await writeChunk(output, "-- Schema\n");
+    for (const row of tableRows) {
+      const sql = String(readRowValue(row, "sql", 2) ?? "").trim();
+      if (!sql) throw new Error(`Schema tabel tidak ditemukan: ${String(readRowValue(row, "name", 1))}`);
+      await writeChunk(output, `${sql.endsWith(";") ? sql : `${sql};`}\n`);
+    }
+    await writeChunk(output, "\n");
+
     for (const row of tableRows) {
       const tableName = String(readRowValue(row, "name", 1));
       const columnsResult = await transaction.execute(`PRAGMA table_info(${quoteIdentifier(tableName)})`);
@@ -176,7 +184,7 @@ async function dumpDatabase(): Promise<DumpResult> {
       const type = String(readRowValue(row, "type", 0));
       if (type === "table") continue;
       const sql = String(readRowValue(row, "sql", 2) ?? "").trim();
-      if (sql) await writeChunk(output, `${sql};\n`);
+      if (sql) await writeChunk(output, `${sql.endsWith(";") ? sql : `${sql};`}\n`);
     }
 
     await writeChunk(output, "\nCOMMIT;\nPRAGMA foreign_keys=ON;\n");
