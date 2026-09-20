@@ -140,10 +140,13 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
     return result ?? reply.status(404).send({ error: "PROMPT_GENERATION_NOT_FOUND" });
   });
 
-  app.get<{ Params: { format: string }; Querystring: { generationId?: string } }>("/api/prompts/export.:format", async (request, reply) => {
+  app.get<{ Params: { format: string }; Querystring: { generationId?: string; promptId?: string | string[] } }>("/api/prompts/export.:format", async (request, reply) => {
     const format = request.params.format === "txt" ? "txt" : request.params.format === "csv" ? "csv" : null;
     if (!format) return reply.status(400).send({ error: "INVALID_EXPORT_FORMAT" });
-    const content = await exportSavedPrompts(format, authOrThrow(request), request.query.generationId);
+    const promptIds = request.query.promptId
+      ? Array.isArray(request.query.promptId) ? request.query.promptId : [request.query.promptId]
+      : [];
+    const content = await exportSavedPrompts(format, authOrThrow(request), request.query.generationId, promptIds);
     reply.header("content-type", format === "csv" ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8");
     reply.header("content-disposition", `attachment; filename="stockscope-prompts.${format}"`);
     return reply.send(content);

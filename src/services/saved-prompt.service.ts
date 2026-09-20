@@ -225,8 +225,25 @@ function csvCell(value: unknown): string {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-export async function exportSavedPrompts(format: "csv" | "txt", auth?: AuthContext | null, generationId?: string): Promise<string> {
-  const rows = (await listSavedPrompts(1_000, auth)).filter((row) => !generationId || row.generationId === generationId);
+export async function exportSavedPrompts(
+  format: "csv" | "txt",
+  auth?: AuthContext | null,
+  generationId?: string,
+  promptIds: string[] = []
+): Promise<string> {
+  const selectedIds = new Set(promptIds.filter(Boolean));
+  const rows = (await listSavedPrompts(1_000, auth)).filter((row) =>
+    (!generationId || row.generationId === generationId) && (!selectedIds.size || selectedIds.has(row.id))
+  );
+  if (rows.length) {
+    const database = getDatabase();
+    const scope = scopeCondition(auth);
+    const exportedIds = rows.map((row) => row.id);
+    const exportedCondition = inArray(savedPrompts.id, exportedIds);
+    await database.update(savedPrompts).set({ status: "downloaded", updatedAt: new Date() }).where(
+      scope ? and(exportedCondition, scope) : exportedCondition
+    );
+  }
   if (format === "txt") return rows.map((row) => row.prompt.replace(/\r?\n/g, " ").trim()).join("\n");
 
   const header = ["id", "title", "prompt", "negative_prompt", "keyword_focus", "seed", "category", "asset_type", "locale", "status", "created_at"];
