@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, inArray, max, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { getDatabase } from "../db/client";
 import { aiRecommendations, savedPrompts } from "../db/schema";
@@ -69,6 +69,14 @@ export interface PublicPromptGenerationSet {
   prompts: ReturnType<typeof publicSavedPrompt>[];
 }
 
+const LIBRARY_PAGE_SIZE = 50;
+
+function asDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  const timestamp = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : new Date();
+}
+
 export async function saveGeneratedPrompts(input: SavePromptInput[]): Promise<void> {
   if (!input.length) return;
   const database = getDatabase();
@@ -111,38 +119,87 @@ export async function listSavedPrompts(limit = 100, auth?: AuthContext | null) {
 }
 
 export async function listPromptGenerationSets(limit = 100, auth?: AuthContext | null): Promise<PublicPromptGenerationSet[]> {
-  const prompts = await listSavedPrompts(Math.min(Math.max(limit * 20, 100), 1_000), auth);
-  const generationIds = [...new Set(prompts.map((item) => item.generationId).filter((id): id is string => Boolean(id)))];
+  return listPromptGenerationSetMetadata(limit, auth);
+}
+
+async function listPromptGenerationSetMetadata(limit = 100, auth?: AuthContext | null): Promise<PublicPromptGenerationSet[]> {
+  const database = getDatabase();
+  const scope = scopeCondition(auth);
+  const latestCreatedAt = max(savedPrompts.createdAt);
+  const rows = await database
+    .select({
+      generationId: savedPrompts.generationId,
+      seed: savedPrompts.seed,
+      category: savedPrompts.category,
+      assetType: savedPrompts.assetType,
+      locale: savedPrompts.locale,
+      createdAt: latestCreatedAt,
+      promptCount: count(savedPrompts.id)
+    })
+    .from(savedPrompts)
+    .where(scope)
+    .groupBy(savedPrompts.generationId)
+    .orderBy(desc(latestCreatedAt))
+    .limit(Math.min(Math.max(limit, 1), 100));
+  const generationIds = rows.map((row) => row.generationId).filter((id): id is string => Boolean(id));
   const generations = generationIds.length
-    ? await getDatabase().select().from(aiRecommendations).where(inArray(aiRecommendations.id, generationIds))
+    ? await database.select().from(aiRecommendations).where(inArray(aiRecommendations.id, generationIds))
     : [];
   const generationMap = new Map(generations.map((item) => [item.id, item]));
-  const groups = new Map<string, PublicPromptGenerationSet>();
-  for (const prompt of prompts) {
-    const id = prompt.generationId ?? `ungrouped-${prompt.createdAt.toISOString().slice(0, 10)}`;
-    const generation = prompt.generationId ? generationMap.get(prompt.generationId) : undefined;
-    const existing = groups.get(id);
-    if (existing) {
-      existing.prompts.push(prompt);
-      existing.promptCount = existing.prompts.length;
-      continue;
-    }
-    groups.set(id, {
-      id,
-      title: generation?.generationTitle || `${prompt.seed} · ${prompt.assetType === "videos" ? "Video" : "Image"} · ${prompt.createdAt.toLocaleDateString("en-GB")}`,
-      seed: prompt.seed,
-      category: prompt.category,
-      assetType: prompt.assetType,
-      locale: prompt.locale,
+  return rows.map((row) => {
+    const generation = row.generationId ? generationMap.get(row.generationId) : undefined;
+    const createdAt = asDate(generation?.createdAt ?? row.createdAt);
+    return {
+      id: row.generationId ?? `ungrouped-${createdAt.toISOString().slice(0, 10)}`,
+      title: generation?.generationTitle || `${row.seed} · ${row.assetType === "videos" ? "Video" : "Image"} · ${createdAt.toLocaleDateString("en-GB")}`,
+      seed: row.seed,
+      category: row.category,
+      assetType: row.assetType,
+      locale: row.locale,
       style: generation?.recommendedStyle || "",
-      createdAt: generation?.createdAt ?? new Date(prompt.createdAt),
-      promptCount: 1,
-      prompts: [prompt]
-    });
-  }
-  return [...groups.values()]
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .slice(0, Math.min(Math.max(limit, 1), 100));
+      createdAt,
+      promptCount: Number(row.promptCount),
+      prompts: []
+    };
+  });
+}
+
+export async function getPromptGenerationSet(
+  generationId: string,
+  limit = LIBRARY_PAGE_SIZE,
+  offset = 0,
+  auth?: AuthContext | null
+): Promise<PublicPromptGenerationSet | null> {
+  const database = getDatabase();
+  const scope = scopeCondition(auth);
+  const generationCondition = eq(savedPrompts.generationId, generationId);
+  const where = scope ? and(generationCondition, scope) : generationCondition;
+  const safeLimit = Math.min(Math.max(limit, 1), LIBRARY_PAGE_SIZE);
+  const safeOffset = Math.max(offset, 0);
+  const [countRow] = await database.select({ promptCount: count(savedPrompts.id) }).from(savedPrompts).where(where);
+  if (!Number(countRow?.promptCount)) return null;
+  const prompts = await database
+    .select()
+    .from(savedPrompts)
+    .where(where)
+    .orderBy(desc(savedPrompts.createdAt))
+    .limit(safeLimit)
+    .offset(safeOffset);
+  const [generation] = await database.select().from(aiRecommendations).where(eq(aiRecommendations.id, generationId)).limit(1);
+  const firstPrompt = prompts[0];
+  const createdAt = asDate(generation?.createdAt ?? firstPrompt?.createdAt);
+  return {
+    id: generationId,
+    title: generation?.generationTitle || (firstPrompt ? `${firstPrompt.seed} · ${firstPrompt.assetType === "videos" ? "Video" : "Image"} · ${createdAt.toLocaleDateString("en-GB")}` : generationId),
+    seed: firstPrompt?.seed ?? "",
+    category: firstPrompt?.category ?? "general",
+    assetType: firstPrompt?.assetType ?? "images",
+    locale: firstPrompt?.locale ?? "en-GB",
+    style: generation?.recommendedStyle || "",
+    createdAt,
+    promptCount: Number(countRow.promptCount),
+    prompts: prompts.map(publicSavedPrompt)
+  };
 }
 
 export async function deleteSavedPrompt(id: string, auth?: AuthContext | null) {

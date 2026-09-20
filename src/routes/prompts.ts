@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getResearchRun } from "../services/research.service";
 import { generatePromptSet } from "../services/prompt-generation.service";
-import { deletePromptGenerationSet, deleteSavedPrompt, exportSavedPrompts, listPromptGenerationSets, listSavedPrompts } from "../services/saved-prompt.service";
+import { deletePromptGenerationSet, deleteSavedPrompt, exportSavedPrompts, getPromptGenerationSet, listPromptGenerationSets, listSavedPrompts } from "../services/saved-prompt.service";
 import { cancelPromptQueueItem, createPromptQueueItems, deletePromptQueueItem, generatePromptQueueItem, listPromptQueue, updatePromptQueueItem } from "../services/prompt-queue.service";
 
 interface CreateBody {
@@ -121,6 +121,18 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: { limit?: string } }>("/api/prompt-library", async (request) => {
     const limit = Number(request.query.limit ?? 100);
     return listPromptGenerationSets(Number.isFinite(limit) ? limit : 100, authOrThrow(request));
+  });
+
+  app.get<{ Params: { generationId: string }; Querystring: { limit?: string; offset?: string } }>("/api/prompt-library/:generationId", async (request, reply) => {
+    const limit = Number(request.query.limit ?? 50);
+    const offset = Number(request.query.offset ?? 0);
+    const result = await getPromptGenerationSet(
+      request.params.generationId,
+      Number.isFinite(limit) ? limit : 50,
+      Number.isFinite(offset) ? offset : 0,
+      authOrThrow(request)
+    );
+    return result ?? reply.status(404).send({ error: "PROMPT_GENERATION_NOT_FOUND" });
   });
 
   app.delete<{ Params: { generationId: string } }>("/api/prompt-library/:generationId", async (request, reply) => {

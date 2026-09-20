@@ -24,14 +24,13 @@ const imagePromptSchema = {
       items: {
         type: "object",
         properties: {
-          title: { type: "string" },
           prompt: { type: "string" },
           negativePrompt: { type: "string" },
           keywordFocus: { type: "array", items: { type: "string" } },
           commercialRationale: { type: "string" },
           confidence: { type: "string", enum: ["low", "medium", "high"] }
         },
-        required: ["title", "prompt", "negativePrompt", "keywordFocus", "commercialRationale", "confidence"]
+        required: ["prompt", "negativePrompt", "keywordFocus", "commercialRationale", "confidence"]
       }
     },
     cautions: { type: "array", items: { type: "string" } }
@@ -69,8 +68,8 @@ function parseJson(value: string | null) {
 
 function normalizePromptResponse(value: unknown) {
   const source = value && typeof value === "object" ? value as Record<string, any> : {};
-  const prompts = Array.isArray(source.prompts) ? source.prompts.map((item: any) => ({
-    title: text(item?.title, 160),
+  const prompts = Array.isArray(source.prompts) ? source.prompts.map((item: any, index: number) => ({
+    title: `Prompt ${index + 1}`,
     prompt: text(item?.prompt, 2_000),
     negativePrompt: text(item?.negativePrompt, 1_000),
     keywordFocus: Array.isArray(item?.keywordFocus) ? item.keywordFocus.filter((entry: unknown): entry is string => typeof entry === "string").slice(0, 12) : [],
@@ -145,7 +144,7 @@ function promptForContext(context: unknown, requestedCount: number, style: strin
     "Prompt harus siap copy-paste, konkret, mendeskripsikan subjek, aksi, setting, pencahayaan, komposisi, ruang copy space, dan kualitas stock yang bersih.",
     "Prioritaskan konsep komersial yang mudah diberi metadata dan hindari logo, merek, karakter berhak cipta, nama artis, watermark, teks acak, dan klaim penjualan.",
     "Setiap prompt harus memiliki angle visual berbeda. Jangan mengulang kalimat prompt.",
-    "Jika tersedia NOVELTY CONTEXT, buat angle baru dan jangan mengulang judul, keyword focus, atau konsep yang tercantum di sana.",
+    "Jika tersedia NOVELTY CONTEXT, buat angle baru dan jangan mengulang keyword focus atau konsep yang tercantum di sana.",
     "Negative prompt harus ringkas dan relevan untuk mengurangi artefak, teks, logo, watermark, anatomi buruk, dan duplikasi.",
     "Confidence hanya mengukur kekuatan evidence dari data, bukan jaminan gambar akan laku.",
     "Kembalikan hanya JSON sesuai schema, tanpa markdown.",
@@ -195,10 +194,6 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
     .digest("hex");
   const noveltyContext = {
     previousGenerationCount: history.length,
-    excludedTitles: history.flatMap((item) => {
-      const response = parseJson(item.responseJson) as Record<string, any> | null;
-      return Array.isArray(response?.prompts) ? response.prompts.map((entry: any) => entry.title) : [];
-    }).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 100),
     excludedKeywords: history.flatMap((item) => {
       const response = parseJson(item.responseJson) as Record<string, any> | null;
       return Array.isArray(response?.prompts) ? response.prompts.flatMap((entry: any) => Array.isArray(entry.keywordFocus) ? entry.keywordFocus : []) : [];
@@ -278,10 +273,10 @@ async function persistSavedPrompts(
   generationId: string,
   auth: AuthContext,
   context: Record<string, any>,
-  response: { prompts: Array<{ title: string; prompt: string; negativePrompt: string; keywordFocus: string[]; commercialRationale: string; confidence: string }> }
+  response: { prompts: Array<{ prompt: string; negativePrompt: string; keywordFocus: string[]; commercialRationale: string; confidence: string }> }
 ) {
   const request = context.request ?? {};
-  await saveGeneratedPrompts(response.prompts.map((item) => ({
+  await saveGeneratedPrompts(response.prompts.map((item, index) => ({
     generationId,
     ownerUserId: auth.isDevBypass ? null : auth.userId,
     organizationId: auth.isDevBypass ? null : auth.organizationId,
@@ -289,7 +284,7 @@ async function persistSavedPrompts(
     category: text(request.category, 40) || "general",
     assetType: request.assetType === "videos" ? "videos" : "images",
     locale: text(request.locale, 20) || "en-GB",
-    title: item.title,
+    title: `Prompt ${index + 1}`,
     prompt: item.prompt,
     negativePrompt: item.negativePrompt,
     keywordFocus: item.keywordFocus,
