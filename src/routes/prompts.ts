@@ -1,7 +1,8 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getResearchRun } from "../services/research.service";
 import { generatePromptSet } from "../services/prompt-generation.service";
 import { deleteSavedPrompt, exportSavedPrompts, listSavedPrompts } from "../services/saved-prompt.service";
+import { cancelPromptQueueItem, createPromptQueueItems, deletePromptQueueItem, generatePromptQueueItem, listPromptQueue, updatePromptQueueItem } from "../services/prompt-queue.service";
 
 interface CreateBody {
   seed?: unknown;
@@ -14,12 +15,102 @@ interface CreateBody {
   model?: unknown;
 }
 
+interface PromptQueueBody {
+  items?: unknown;
+  keyword?: unknown;
+  category?: unknown;
+  researchAssetType?: unknown;
+  promptOutputType?: unknown;
+  locale?: unknown;
+  promptCount?: unknown;
+  recommendedStyle?: unknown;
+  styleRationale?: unknown;
+  sourceReadoutId?: unknown;
+  sourceScore?: unknown;
+  sourceLevel?: unknown;
+  sourceConfidence?: unknown;
+  sourceEvidence?: unknown;
+  sourceObservedAt?: unknown;
+  confirmLowConfidence?: unknown;
+}
+
 function authOrThrow(request: { auth: import("../auth").AuthContext | null }) {
   if (!request.auth) throw new Error("UNAUTHORIZED");
   return request.auth;
 }
 
+function normalizePromptQueueItems(body: PromptQueueBody) {
+  const rawItems = Array.isArray(body.items) ? body.items : [body];
+  return rawItems.map((item) => {
+    const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    return {
+      keyword: typeof value.keyword === "string" ? value.keyword : "",
+      category: typeof value.category === "string" ? value.category : undefined,
+      researchAssetType: value.researchAssetType === "videos" ? "videos" as const : "images" as const,
+      promptOutputType: value.promptOutputType === "video" ? "video" as const : "image" as const,
+      locale: typeof value.locale === "string" ? value.locale : undefined,
+      promptCount: typeof value.promptCount === "number" ? value.promptCount : undefined,
+      recommendedStyle: typeof value.recommendedStyle === "string" ? value.recommendedStyle : undefined,
+      styleRationale: typeof value.styleRationale === "string" ? value.styleRationale : undefined,
+      sourceReadoutId: typeof value.sourceReadoutId === "string" ? value.sourceReadoutId : undefined,
+      sourceScore: typeof value.sourceScore === "number" ? value.sourceScore : undefined,
+      sourceLevel: typeof value.sourceLevel === "number" ? value.sourceLevel : undefined,
+      sourceConfidence: value.sourceConfidence === "low" || value.sourceConfidence === "medium" || value.sourceConfidence === "high" ? value.sourceConfidence as "low" | "medium" | "high" : undefined,
+      sourceEvidence: Array.isArray(value.sourceEvidence) ? value.sourceEvidence.filter((entry): entry is string => typeof entry === "string") : undefined,
+      sourceObservedAt: typeof value.sourceObservedAt === "string" ? value.sourceObservedAt : undefined
+    };
+  });
+}
+
+async function createPromptQueueHandler(request: FastifyRequest<{ Body: PromptQueueBody }>, reply: FastifyReply) {
+  const auth = authOrThrow(request);
+  try {
+    return await createPromptQueueItems(normalizePromptQueueItems(request.body ?? {}), auth);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Prompt queue gagal dibuat";
+    return reply.status(400).send({ error: "PROMPT_QUEUE_INVALID", message });
+  }
+}
+
 export async function promptRoutes(app: FastifyInstance): Promise<void> {
+  app.get<{ Querystring: { limit?: string } }>("/api/prompt-queue", async (request) => {
+    return listPromptQueue(Number(request.query.limit ?? 100), authOrThrow(request));
+  });
+
+  app.post<{ Body: PromptQueueBody }>("/api/prompt-queue", createPromptQueueHandler);
+  app.post<{ Body: PromptQueueBody }>("/api/prompt-queue/batch", createPromptQueueHandler);
+
+  app.patch<{ Params: { id: string }; Body: PromptQueueBody }>("/api/prompt-queue/:id", async (request, reply) => {
+    const body = request.body ?? {};
+    const item = await updatePromptQueueItem(request.params.id, {
+      promptCount: typeof body.promptCount === "number" ? body.promptCount : undefined,
+      promptOutputType: body.promptOutputType === "video" ? "video" : body.promptOutputType === "image" ? "image" : undefined,
+      recommendedStyle: typeof body.recommendedStyle === "string" ? body.recommendedStyle : undefined
+    }, authOrThrow(request));
+    return item ?? reply.status(404).send({ error: "PROMPT_QUEUE_NOT_FOUND" });
+  });
+
+  app.post<{ Params: { id: string }; Body: { confirmLowConfidence?: unknown } }>("/api/prompt-queue/:id/generate", async (request, reply) => {
+    try {
+      const result = await generatePromptQueueItem(request.params.id, authOrThrow(request), { confirmLowConfidence: request.body?.confirmLowConfidence === true });
+      return result ?? reply.status(404).send({ error: "PROMPT_QUEUE_NOT_FOUND" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Prompt generation gagal";
+      const clientError = message === "NO_GEMINI_API_KEY" || message === "PROMPT_CONTEXT_EMPTY" || message === "LOW_CONFIDENCE_CONFIRMATION_REQUIRED";
+      return reply.status(clientError ? 400 : 502).send({ error: clientError ? message : "PROMPT_GENERATION_FAILED", message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/prompt-queue/:id", async (request, reply) => {
+    const result = await deletePromptQueueItem(request.params.id, authOrThrow(request));
+    return result ?? reply.status(404).send({ error: "PROMPT_QUEUE_NOT_FOUND" });
+  });
+
+  app.post<{ Params: { id: string } }>("/api/prompt-queue/:id/cancel", async (request, reply) => {
+    const result = await cancelPromptQueueItem(request.params.id, authOrThrow(request));
+    return result ?? reply.status(404).send({ error: "PROMPT_QUEUE_NOT_FOUND" });
+  });
+
   app.get<{ Querystring: { limit?: string } }>("/api/prompts", async (request) => {
     const limit = Number(request.query.limit ?? 100);
     return listSavedPrompts(Number.isFinite(limit) ? limit : 100, authOrThrow(request));

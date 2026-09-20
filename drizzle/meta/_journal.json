@@ -134,6 +134,20 @@
       "when": 1789826872920,
       "tag": "0018_nostalgic_grim_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1789880574050,
+      "tag": "0019_bizarre_wendigo",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1789883622010,
+      "tag": "0020_tough_toad_men",
+      "breakpoints": true
     }
   ]
 }

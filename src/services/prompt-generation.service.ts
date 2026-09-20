@@ -128,11 +128,11 @@ function compactContext(context: unknown, input: Required<Pick<PromptInput, "see
   };
 }
 
-function promptForContext(context: unknown, requestedCount: number, style: string) {
+function promptForContext(context: unknown, requestedCount: number, style: string, assetType: string) {
   return [
-    "Anda adalah art director microstock yang membuat prompt untuk generator gambar AI eksternal seperti Adobe Firefly atau Midjourney.",
-    `Buat tepat ${requestedCount} prompt gambar yang berbeda tetapi tetap relevan dengan data riset.`,
-    `Gaya produksi: ${style || "commercial stock photography"}.`,
+    `Anda adalah art director microstock yang membuat prompt ${assetType === "videos" ? "video" : "gambar"} untuk generator AI eksternal seperti Adobe Firefly atau Midjourney.`,
+    `Buat tepat ${requestedCount} prompt ${assetType === "videos" ? "video" : "gambar"} yang berbeda tetapi tetap relevan dengan data riset.`,
+    `Gaya produksi: ${style || (assetType === "videos" ? "commercial stock video" : "commercial stock photography")}.`,
     "Gunakan keyword dan asset evidence sebagai arah konsep, bukan sebagai klaim penjualan.",
     "Prompt harus siap copy-paste, konkret, mendeskripsikan subjek, aksi, setting, pencahayaan, komposisi, ruang copy space, dan kualitas stock yang bersih.",
     "Prioritaskan konsep komersial yang mudah diberi metadata dan hindari logo, merek, karakter berhak cipta, nama artis, watermark, teks acak, dan klaim penjualan.",
@@ -203,7 +203,7 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
     const response = await generateStructuredWithUserGeminiKey(
       userId,
       model,
-      promptForContext({ ...context, style }, requestedCount, style),
+      promptForContext({ ...context, style }, requestedCount, style, assetType),
       imagePromptSchema,
       Math.min(8_000, 1_000 + requestedCount * 700)
     );

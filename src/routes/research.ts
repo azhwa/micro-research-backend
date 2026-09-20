@@ -45,6 +45,8 @@ interface CreateQueueBody {
   locale?: unknown;
 }
 
+interface CreateQueueBatchBody { items?: unknown }
+
 function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0
     ? value
@@ -66,6 +68,40 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       locale: typeof request.body?.locale === "string" && request.body.locale.trim() ? request.body.locale.trim() : "en-GB"
     });
     return reply.status(201).send(item);
+  });
+
+  app.post<{ Body: CreateQueueBatchBody }>("/api/research-queue/batch", async (request, reply) => {
+    const rawItems = Array.isArray(request.body?.items) ? request.body.items.slice(0, 20) : [];
+    const rejected: Array<{ keyword: string; reason: string }> = [];
+    if (Array.isArray(request.body?.items) && request.body.items.length > 20) rejected.push(...request.body.items.slice(20).map((item) => ({ keyword: item && typeof item === "object" && typeof (item as Record<string, unknown>).keyword === "string" ? (item as Record<string, string>).keyword : "", reason: "MAX_BATCH_20" })));
+    const created = [];
+    const duplicate: string[] = [];
+    const queueKey = (keyword: string, category: string, assetType: string, locale: string) => `${keyword.toLowerCase().replace(/\s+/g, " ")}::${category.toLowerCase().replace(/\s+/g, " ")}::${assetType}::${locale}`;
+    const seen = new Set<string>();
+    const existingKeys = new Set((await listResearchQueue(1_000, request.auth)).filter((item) => item.status === "queued").map((item) => queueKey(item.seedKeyword.trim(), item.category.trim() || "general", item.assetType, item.locale.trim() || "en-GB")));
+    for (const raw of rawItems) {
+      const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      const keyword = typeof value.keyword === "string" ? value.keyword.trim() : "";
+      if (!keyword || keyword.length > 120) { rejected.push({ keyword, reason: "INVALID_KEYWORD" }); continue; }
+      const normalized = keyword.toLowerCase().replace(/\s+/g, " ");
+      const category = typeof value.category === "string" && value.category.trim() ? value.category.trim().slice(0, 40) : "general";
+      const assetType = value.assetType === "videos" ? "videos" : "images";
+      const locale = typeof value.locale === "string" && value.locale.trim() ? value.locale.trim() : "en-GB";
+      const key = queueKey(normalized, category, assetType, locale);
+      if (seen.has(key) || existingKeys.has(key)) { duplicate.push(keyword); continue; }
+      seen.add(key);
+      const item = await createResearchQueueItem({
+        seedKeyword: keyword,
+        category,
+        ownerUserId: request.auth?.isDevBypass ? null : request.auth?.userId,
+        organizationId: request.auth?.isDevBypass ? null : request.auth?.organizationId,
+        assetType,
+        locale
+      });
+      created.push(item);
+      existingKeys.add(key);
+    }
+    return reply.status(201).send({ created, duplicate, rejected, skipped: duplicate.length + rejected.length });
   });
 
   app.get<{ Querystring: { limit?: string } }>("/api/research-queue", async (request) => {

@@ -362,9 +362,11 @@ export const aiRecommendations = sqliteTable(
     id: text("id").primaryKey(),
     researchRunId: text("research_run_id").references(() => researchRuns.id, { onDelete: "cascade" }),
     scope: text("scope").notNull().default("run"),
+    readoutType: text("readout_type").notNull().default("legacy"),
     promptVersion: text("prompt_version").notNull(),
     model: text("model"),
     inputHash: text("input_hash").notNull(),
+    readoutFiltersJson: text("readout_filters_json").notNull().default("{}"),
     status: text("status").notNull().default("pending"),
     requestJson: text("request_json"),
     responseJson: text("response_json"),
@@ -375,6 +377,7 @@ export const aiRecommendations = sqliteTable(
   },
   (table) => [
     index("ai_recommendations_run_idx").on(table.researchRunId),
+    index("ai_recommendations_scope_type_idx").on(table.scope, table.readoutType),
     index("ai_recommendations_status_idx").on(table.status),
     uniqueIndex("ai_recommendations_input_idx").on(table.inputHash)
   ]
@@ -406,6 +409,43 @@ export const savedPrompts = sqliteTable(
     index("saved_prompts_org_created_idx").on(table.organizationId, table.createdAt),
     index("saved_prompts_generation_idx").on(table.generationId),
     index("saved_prompts_status_idx").on(table.status)
+  ]
+);
+
+export const promptQueueItems = sqliteTable(
+  "prompt_queue_items",
+  {
+    id: text("id").primaryKey(),
+    ownerUserId: text("owner_user_id"),
+    organizationId: text("organization_id"),
+    sourceReadoutId: text("source_readout_id").references(() => aiRecommendations.id, { onDelete: "set null" }),
+    sourceScore: real("source_score"),
+    sourceLevel: integer("source_level"),
+    sourceConfidence: text("source_confidence"),
+    sourceEvidenceJson: text("source_evidence_json").notNull().default("[]"),
+    sourceObservedAt: integer("source_observed_at", { mode: "timestamp_ms" }),
+    keyword: text("keyword").notNull(),
+    normalizedKeyword: text("normalized_keyword").notNull(),
+    category: text("category").notNull().default("general"),
+    researchAssetType: text("research_asset_type").notNull().default("images"),
+    promptOutputType: text("prompt_output_type").notNull().default("image"),
+    locale: text("locale").notNull().default("en-GB"),
+    promptCount: integer("prompt_count").notNull().default(5),
+    recommendedStyle: text("recommended_style").notNull().default("commercial stock photography"),
+    styleRationale: text("style_rationale").notNull().default(""),
+    status: text("status").notNull().default("queued"),
+    generationId: text("generation_id").references(() => aiRecommendations.id, { onDelete: "set null" }),
+    errorMessage: text("error_message"),
+    createdAt: createdAt(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    updatedAt: updatedAt()
+  },
+  (table) => [
+    index("prompt_queue_owner_created_idx").on(table.ownerUserId, table.createdAt),
+    index("prompt_queue_org_created_idx").on(table.organizationId, table.createdAt),
+    index("prompt_queue_status_idx").on(table.status),
+    index("prompt_queue_keyword_idx").on(table.normalizedKeyword)
   ]
 );
 

@@ -16,6 +16,11 @@ export interface CreateResearchQueueInput {
   locale: string;
 }
 
+function normalizeQueueText(value: string, fallback: string): string {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return normalized || fallback;
+}
+
 function queueScopeCondition(auth?: AuthContext | null): SQL | undefined {
   if (!auth || auth.isDevBypass) return undefined;
   return auth.organizationId
@@ -36,6 +41,10 @@ async function findQueueItem(id: string, auth?: AuthContext | null) {
 
 export async function createResearchQueueItem(input: CreateResearchQueueInput) {
   const database = getDatabase();
+  const seedKeyword = normalizeQueueText(input.seedKeyword, "");
+  const category = normalizeQueueText(input.category, "general");
+  const assetType = input.assetType === "videos" ? "videos" : "images";
+  const locale = input.locale.trim() || "en-GB";
   const scope = input.organizationId
     ? eq(researchQueue.organizationId, input.organizationId)
     : input.ownerUserId
@@ -44,21 +53,24 @@ export async function createResearchQueueItem(input: CreateResearchQueueInput) {
   const existingRows = await database
     .select()
     .from(researchQueue)
-    .where(scope
-      ? and(scope, eq(researchQueue.seedKeyword, input.seedKeyword), eq(researchQueue.status, "queued"))
-      : and(eq(researchQueue.seedKeyword, input.seedKeyword), eq(researchQueue.status, "queued")))
-    .limit(1);
-  if (existingRows[0]) return existingRows[0];
+    .where(scope ? and(scope, eq(researchQueue.status, "queued")) : eq(researchQueue.status, "queued"));
+  const existing = existingRows.find((item) =>
+    normalizeQueueText(item.seedKeyword, "") === seedKeyword
+    && normalizeQueueText(item.category, "general") === category
+    && item.assetType === assetType
+    && item.locale === locale
+  );
+  if (existing) return existing;
 
   const id = `queue_${randomUUID()}`;
   await database.insert(researchQueue).values({
     id,
-    seedKeyword: input.seedKeyword,
-    category: input.category,
+    seedKeyword,
+    category,
     ownerUserId: input.ownerUserId ?? null,
     organizationId: input.organizationId ?? null,
-    assetType: input.assetType,
-    locale: input.locale,
+    assetType,
+    locale,
     mode: "full",
     maxSuggestions: 1,
     assetsPerQuery: 100,
