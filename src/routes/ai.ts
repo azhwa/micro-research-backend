@@ -16,7 +16,7 @@ import { getResearchRun } from "../services/research.service";
 interface PrepareBody { promptVersion?: unknown; model?: unknown }
 interface ResultBody { response?: unknown; message?: unknown }
 interface GenerateBody { model?: unknown }
-interface GlobalGenerateBody { model?: unknown; assetType?: unknown; locale?: unknown; category?: unknown; type?: unknown }
+interface GlobalGenerateBody { model?: unknown; assetType?: unknown; locale?: unknown; category?: unknown; type?: unknown; generationSeed?: unknown; generateAnother?: unknown }
 
 export async function aiRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: GlobalGenerateBody }>("/api/ai-recommendations/global/generate", async (request, reply) => {
@@ -55,13 +55,16 @@ export async function aiRoutes(app: FastifyInstance): Promise<void> {
         model: typeof request.body?.model === "string" ? request.body.model : undefined,
         assetType: typeof request.body?.assetType === "string" ? request.body.assetType : undefined,
         locale: typeof request.body?.locale === "string" ? request.body.locale : undefined,
-        category: typeof request.body?.category === "string" ? request.body.category : undefined
+        category: typeof request.body?.category === "string" ? request.body.category : undefined,
+        generationSeed: typeof request.body?.generationSeed === "string" ? request.body.generationSeed : undefined,
+        generateAnother: request.body?.generateAnother === true
       }, request.auth);
       if (!result) return reply.status(400).send({ error: "GLOBAL_CONTEXT_EMPTY", message: "Belum ada snapshot global." });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gemini request gagal";
       if (message === "NO_GEMINI_API_KEY") return reply.status(400).send({ error: message, message: "Tambahkan Gemini API key Anda terlebih dahulu" });
+      if (message === "READOUT_VARIATION_LIMIT") return reply.status(400).send({ error: message, message: "Maksimal 5 variasi untuk context readout ini sudah tercapai" });
       return reply.status(502).send({ error: "GEMINI_REQUEST_FAILED", message });
     }
   });

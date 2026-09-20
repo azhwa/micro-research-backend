@@ -366,6 +366,14 @@ export const aiRecommendations = sqliteTable(
     promptVersion: text("prompt_version").notNull(),
     model: text("model"),
     inputHash: text("input_hash").notNull(),
+    contextHash: text("context_hash"),
+    generationGroupId: text("generation_group_id"),
+    generationIndex: integer("generation_index").notNull().default(1),
+    generationSeed: text("generation_seed"),
+    generationTitle: text("generation_title"),
+    noveltyContextJson: text("novelty_context_json").notNull().default("{}"),
+    outputType: text("output_type"),
+    recommendedStyle: text("recommended_style"),
     readoutFiltersJson: text("readout_filters_json").notNull().default("{}"),
     status: text("status").notNull().default("pending"),
     requestJson: text("request_json"),
@@ -378,6 +386,7 @@ export const aiRecommendations = sqliteTable(
   (table) => [
     index("ai_recommendations_run_idx").on(table.researchRunId),
     index("ai_recommendations_scope_type_idx").on(table.scope, table.readoutType),
+    index("ai_recommendations_generation_group_idx").on(table.generationGroupId, table.generationIndex),
     index("ai_recommendations_status_idx").on(table.status),
     uniqueIndex("ai_recommendations_input_idx").on(table.inputHash)
   ]

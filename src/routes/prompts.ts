@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getResearchRun } from "../services/research.service";
 import { generatePromptSet } from "../services/prompt-generation.service";
-import { deleteSavedPrompt, exportSavedPrompts, listSavedPrompts } from "../services/saved-prompt.service";
+import { deletePromptGenerationSet, deleteSavedPrompt, exportSavedPrompts, listPromptGenerationSets, listSavedPrompts } from "../services/saved-prompt.service";
 import { cancelPromptQueueItem, createPromptQueueItems, deletePromptQueueItem, generatePromptQueueItem, listPromptQueue, updatePromptQueueItem } from "../services/prompt-queue.service";
 
 interface CreateBody {
@@ -13,6 +13,8 @@ interface CreateBody {
   count?: unknown;
   style?: unknown;
   model?: unknown;
+  generationSeed?: unknown;
+  generateAnother?: unknown;
 }
 
 interface PromptQueueBody {
@@ -116,10 +118,20 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
     return listSavedPrompts(Number.isFinite(limit) ? limit : 100, authOrThrow(request));
   });
 
-  app.get<{ Params: { format: string } }>("/api/prompts/export.:format", async (request, reply) => {
+  app.get<{ Querystring: { limit?: string } }>("/api/prompt-library", async (request) => {
+    const limit = Number(request.query.limit ?? 100);
+    return listPromptGenerationSets(Number.isFinite(limit) ? limit : 100, authOrThrow(request));
+  });
+
+  app.delete<{ Params: { generationId: string } }>("/api/prompt-library/:generationId", async (request, reply) => {
+    const result = await deletePromptGenerationSet(request.params.generationId, authOrThrow(request));
+    return result ?? reply.status(404).send({ error: "PROMPT_GENERATION_NOT_FOUND" });
+  });
+
+  app.get<{ Params: { format: string }; Querystring: { generationId?: string } }>("/api/prompts/export.:format", async (request, reply) => {
     const format = request.params.format === "txt" ? "txt" : request.params.format === "csv" ? "csv" : null;
     if (!format) return reply.status(400).send({ error: "INVALID_EXPORT_FORMAT" });
-    const content = await exportSavedPrompts(format, authOrThrow(request));
+    const content = await exportSavedPrompts(format, authOrThrow(request), request.query.generationId);
     reply.header("content-type", format === "csv" ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8");
     reply.header("content-disposition", `attachment; filename="stockscope-prompts.${format}"`);
     return reply.send(content);
@@ -146,7 +158,9 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
         locale: typeof request.body?.locale === "string" ? request.body.locale : undefined,
         count: typeof request.body?.count === "number" ? request.body.count : undefined,
         style: typeof request.body?.style === "string" ? request.body.style : undefined,
-        model: typeof request.body?.model === "string" ? request.body.model : undefined
+        model: typeof request.body?.model === "string" ? request.body.model : undefined,
+        generationSeed: typeof request.body?.generationSeed === "string" ? request.body.generationSeed : undefined,
+        generateAnother: request.body?.generateAnother === true
       });
       if (!result) {
         return reply.status(400).send({
@@ -157,9 +171,8 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Prompt generation gagal";
-      if (message === "NO_GEMINI_API_KEY") {
-        return reply.status(400).send({ error: message, message: "Tambahkan Gemini API key Anda terlebih dahulu" });
-      }
+      if (message === "NO_GEMINI_API_KEY") return reply.status(400).send({ error: message, message: "Tambahkan Gemini API key Anda terlebih dahulu" });
+      if (message === "PROMPT_VARIATION_LIMIT") return reply.status(400).send({ error: message, message: "Maksimal lima variasi untuk context ini sudah tercapai" });
       return reply.status(502).send({ error: "PROMPT_GENERATION_FAILED", message });
     }
   });

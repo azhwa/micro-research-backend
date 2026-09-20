@@ -25,6 +25,13 @@ function publicRecommendation(row: typeof aiRecommendations.$inferSelect) {
     promptVersion: row.promptVersion,
     model: row.model,
     inputHash: row.inputHash,
+    contextHash: row.contextHash,
+    generationGroupId: row.generationGroupId,
+    generationIndex: row.generationIndex,
+    generationSeed: row.generationSeed,
+    generationTitle: row.generationTitle,
+    outputType: row.outputType,
+    recommendedStyle: row.recommendedStyle,
     readoutFilters: parseJson(row.readoutFiltersJson) ?? {},
     status: row.status,
     response: parseJson(row.responseJson),
@@ -144,6 +151,48 @@ export async function listGlobalAiRecommendations(limit = 20, readoutType?: "ass
   return matching.slice(0, Math.min(Math.max(limit, 1), 100)).map(publicRecommendation);
 }
 
+const assetReadoutSchema = {
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    overallAssessment: { type: "string" },
+    recommendations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          assetConcept: { type: "string" },
+          sourceAssetIds: { type: "array", items: { type: "string" } },
+          sourceAssetUrls: { type: "array", items: { type: "string" } },
+          keywordSuggestions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                keyword: { type: "string" },
+                score: { type: "number" },
+                level: { type: "number" },
+                label: { type: "string" },
+                confidence: { type: "string", enum: ["low", "medium", "high"] }
+              },
+              required: ["keyword", "score", "level", "label", "confidence"]
+            }
+          },
+          recommendedStyle: { type: "string" },
+          styleRationale: { type: "string" },
+          format: { type: "string", enum: ["image", "video"] },
+          promptDirection: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
+          confidence: { type: "string", enum: ["low", "medium", "high"] }
+        },
+        required: ["assetConcept", "sourceAssetIds", "sourceAssetUrls", "keywordSuggestions", "recommendedStyle", "styleRationale", "format", "promptDirection", "evidence", "confidence"]
+      }
+    },
+    cautions: { type: "array", items: { type: "string" } }
+  },
+  required: ["summary", "overallAssessment", "recommendations", "cautions"]
+};
+
 const keywordReadoutSchema = {
   type: "object",
   properties: {
@@ -190,10 +239,87 @@ function keywordReadoutPrompt(context: unknown) {
   ].join("\n");
 }
 
+function assetReadoutPrompt(context: unknown, novelty: Record<string, unknown>) {
+  return [
+    "Anda adalah analis konsep visual microstock yang bekerja dengan evidence Adobe Stock.",
+    "Pilih beberapa asset atau konsep yang memiliki sinyal observasi paling kuat, lalu turunkan keyword dan style visual yang dapat langsung dipakai untuk membuat prompt.",
+    "Keyword suggestions wajib disalin dari keyword global atau seenForKeywords pada data. Jangan membuat keyword baru yang tidak ada di data.",
+    "Pilih satu recommendedStyle dari katalog: commercial stock photography, editorial lifestyle, product still life, isolated subject, cinematic image, commercial stock video, cinematic video, editorial footage, aerial, macro, atau timelapse.",
+    "Jangan mengarang download, view, revenue, upload date, atau jaminan penjualan. Score dan level harus disalin dari data yang tersedia.",
+    "Hindari asset concept, keyword, style, dan source asset yang sudah muncul dalam NOVELTY GUARD. Cari angle visual yang berbeda tetapi tetap evidence-based.",
+    "Kembalikan JSON saja sesuai schema dengan 3 sampai 10 recommendations.",
+    "NOVELTY GUARD:",
+    JSON.stringify(novelty),
+    "DATA RISET:",
+    JSON.stringify(context)
+  ].join("\n");
+}
+
 const STYLE_CATALOG = new Set([
   "commercial stock photography", "editorial lifestyle", "product still life", "isolated subject", "cinematic image",
   "commercial stock video", "cinematic video", "editorial footage", "aerial", "macro", "timelapse"
 ]);
+
+function normalizeStyle(value: unknown) {
+  return typeof value === "string" && STYLE_CATALOG.has(value) ? value : "commercial stock photography";
+}
+
+function normalizeAssetReadout(value: unknown, context: Record<string, any>, defaultFormat: "image" | "video") {
+  const source = value && typeof value === "object" ? value as Record<string, any> : {};
+  const topAssets = Array.isArray(context.topAssets) ? context.topAssets : [];
+  const topKeywords = Array.isArray(context.topKeywords) ? context.topKeywords : [];
+  const assetsById = new Map(topAssets.map((item: any) => [String(item.externalId ?? ""), item]));
+  const assetsByUrl = new Map(topAssets.map((item: any) => [String(item.assetUrl ?? ""), item]));
+  const keywordEvidence = new Map<string, any>();
+  for (const item of topKeywords) {
+    const key = String(item.keyword ?? "").trim().toLowerCase();
+    if (key) keywordEvidence.set(key, item);
+  }
+  for (const item of topAssets) {
+    for (const keyword of Array.isArray(item.seenForKeywords) ? item.seenForKeywords : []) {
+      const key = String(keyword).trim().toLowerCase();
+      if (key && !keywordEvidence.has(key)) keywordEvidence.set(key, { keyword });
+    }
+  }
+  const recommendations = Array.isArray(source.recommendations) ? source.recommendations.slice(0, 10).map((item: any) => {
+    const sourceAssetIds = Array.isArray(item?.sourceAssetIds)
+      ? item.sourceAssetIds.map((id: unknown) => String(id)).filter((id: string) => assetsById.has(id)).slice(0, 8)
+      : [];
+    const sourceAssetUrls = Array.isArray(item?.sourceAssetUrls)
+      ? item.sourceAssetUrls.map((url: unknown) => String(url)).filter((url: string) => assetsByUrl.has(url)).slice(0, 8)
+      : [];
+    const keywordSuggestions = Array.isArray(item?.keywordSuggestions) ? item.keywordSuggestions.slice(0, 8).map((entry: any) => {
+      const keyword = typeof entry?.keyword === "string" ? entry.keyword.trim().slice(0, 120) : "";
+      const evidence = keywordEvidence.get(keyword.toLowerCase());
+      return {
+        keyword,
+        score: typeof entry?.score === "number" ? Math.max(0, Math.min(100, entry.score)) : evidence?.globalOpportunityScore ?? null,
+        level: typeof entry?.level === "number" ? Math.max(0, Math.min(5, Math.round(entry.level))) : evidence?.level ?? 0,
+        label: typeof entry?.label === "string" ? entry.label.trim().slice(0, 60) : evidence?.label ?? "insufficient evidence",
+        confidence: entry?.confidence === "high" || entry?.confidence === "medium" ? entry.confidence : "low"
+      };
+    }).filter((entry: any) => entry.keyword && keywordEvidence.has(entry.keyword.toLowerCase())) : [];
+    const source = sourceAssetIds.map((id: string) => assetsById.get(id)).find(Boolean) ?? sourceAssetUrls.map((url: string) => assetsByUrl.get(url)).find(Boolean);
+    return {
+      assetConcept: typeof item?.assetConcept === "string" ? item.assetConcept.trim().slice(0, 180) : source?.title ?? "",
+      sourceAssetIds,
+      sourceAssetUrls,
+      keywordSuggestions,
+      recommendedStyle: normalizeStyle(item?.recommendedStyle),
+      styleRationale: typeof item?.styleRationale === "string" ? item.styleRationale.trim().slice(0, 500) : "",
+      format: item?.format === "video" ? "video" : defaultFormat,
+      promptDirection: typeof item?.promptDirection === "string" ? item.promptDirection.trim().slice(0, 600) : "",
+      evidence: Array.isArray(item?.evidence) ? item.evidence.filter((entry: unknown): entry is string => typeof entry === "string").slice(0, 8) : [],
+      confidence: item?.confidence === "high" || item?.confidence === "medium" ? item.confidence : "low"
+    };
+  }).filter((item: any) => item.assetConcept) : [];
+  return {
+    summary: typeof source.summary === "string" ? source.summary.trim().slice(0, 800) : "",
+    overallAssessment: typeof source.overallAssessment === "string" ? source.overallAssessment.trim().slice(0, 800) : "",
+    recommendations,
+    cautions: Array.isArray(source.cautions) ? source.cautions.filter((entry: unknown): entry is string => typeof entry === "string").slice(0, 8) : []
+  };
+}
 
 function normalizeKeywordReadout(value: unknown) {
   const source = value && typeof value === "object" ? value as Record<string, any> : {};
@@ -223,7 +349,7 @@ function normalizeKeywordReadout(value: unknown) {
 
 export async function generateGlobalAiReadout(
   userId: string,
-  options: { type: "asset" | "keyword"; model?: string; assetType?: string; locale?: string; category?: string },
+  options: { type: "asset" | "keyword"; model?: string; assetType?: string; locale?: string; category?: string; generationSeed?: string; generateAnother?: boolean },
   auth?: AuthContext | null
 ) {
   const model = options.model?.trim() || DEFAULT_GEMINI_MODEL;
@@ -236,23 +362,51 @@ export async function generateGlobalAiReadout(
   };
   const { generatedAt: _generatedAt, ...stableContext } = context;
   const promptVersion = options.type === "keyword" ? "global-keyword-readout-v1" : "global-asset-readout-v1";
-  const inputHash = createHash("sha256").update(JSON.stringify({ scope: "global", readoutType: options.type, promptVersion, model, context: stableContext })).digest("hex");
+  const contextHash = createHash("sha256").update(JSON.stringify({ scope: "global", readoutType: options.type, promptVersion, model, context: stableContext })).digest("hex");
+  const generationGroupId = `global-readout:${options.type}:${contextHash}`;
   const database = getDatabase();
+  const history = await database.select().from(aiRecommendations)
+    .where(and(eq(aiRecommendations.scope, "global"), eq(aiRecommendations.readoutType, options.type), eq(aiRecommendations.contextHash, contextHash)))
+    .orderBy(desc(aiRecommendations.generationIndex), desc(aiRecommendations.createdAt))
+    .limit(10);
+  const latest = history.find((item) => item.status === "completed");
+  if (!options.generateAnother && !options.generationSeed && latest) return { recommendation: publicRecommendation(latest), context };
+  if (options.generateAnother && history.length >= 5) throw new Error("READOUT_VARIATION_LIMIT");
+  const generationIndex = (history[0]?.generationIndex ?? 0) + 1;
+  const generationSeed = options.generationSeed?.trim().slice(0, 80) || (generationIndex === 1 ? "base" : `variation-${randomUUID().slice(0, 8)}`);
+  const inputHash = createHash("sha256").update(JSON.stringify({ generationGroupId, generationIndex, generationSeed })).digest("hex");
   const existing = await database.select().from(aiRecommendations).where(eq(aiRecommendations.inputHash, inputHash)).limit(1);
   let row = existing[0];
+  const noveltyContext = {
+    previousGenerationCount: history.length,
+    excludedConcepts: history.flatMap((item) => {
+      const response = parseJson(item.responseJson) as Record<string, any> | null;
+      return options.type === "asset"
+        ? (Array.isArray(response?.recommendations) ? response.recommendations.map((entry: any) => entry.assetConcept) : [])
+        : (Array.isArray(response?.keywords) ? response.keywords.map((entry: any) => entry.keyword) : []);
+    }).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 100),
+    excludedStyles: history.flatMap((item) => {
+      const response = parseJson(item.responseJson) as Record<string, any> | null;
+      const entries = options.type === "asset" ? response?.recommendations : response?.keywords;
+      return Array.isArray(entries) ? entries.map((entry: any) => entry.recommendedStyle) : [];
+    }).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 40)
+  };
+  const generationContext = { ...context, generation: { generationGroupId, generationIndex, generationSeed }, novelty: noveltyContext };
+  const generationTitle = `${options.type === "asset" ? "Asset" : "Keyword"} Readout · ${context.filters.assetType}/${context.filters.locale}/${context.filters.category} · Variation ${generationIndex}`;
   if (row?.status === "completed") return { recommendation: publicRecommendation(row), context };
   if (row) {
-    const [updated] = await database.update(aiRecommendations).set({ status: "pending", requestJson: JSON.stringify(context), readoutFiltersJson: JSON.stringify(context.filters), responseJson: null, errorMessage: null, updatedAt: new Date(), completedAt: null }).where(eq(aiRecommendations.id, row.id)).returning();
+    const [updated] = await database.update(aiRecommendations).set({ status: "pending", requestJson: JSON.stringify(generationContext), noveltyContextJson: JSON.stringify(noveltyContext), responseJson: null, errorMessage: null, updatedAt: new Date(), completedAt: null }).where(eq(aiRecommendations.id, row.id)).returning();
     row = updated ?? row;
   } else {
-    const [created] = await database.insert(aiRecommendations).values({ id: `ai_${randomUUID()}`, researchRunId: null, scope: "global", readoutType: options.type, promptVersion, model, inputHash, readoutFiltersJson: JSON.stringify(context.filters), status: "pending", requestJson: JSON.stringify(context) }).returning();
+    const [created] = await database.insert(aiRecommendations).values({ id: `ai_${randomUUID()}`, researchRunId: null, scope: "global", readoutType: options.type, promptVersion, model, inputHash, contextHash, generationGroupId, generationIndex, generationSeed, generationTitle, noveltyContextJson: JSON.stringify(noveltyContext), outputType: context.filters.assetType === "videos" ? "video" : "image", readoutFiltersJson: JSON.stringify(context.filters), status: "pending", requestJson: JSON.stringify(generationContext) }).returning();
     row = created;
   }
   try {
     const response = options.type === "keyword"
-      ? await generateStructuredWithUserGeminiKey(userId, model, keywordReadoutPrompt(context), keywordReadoutSchema, 5_000)
-      : await generateWithUserGeminiKey(userId, model, context);
-    const recommendation = await completeAiRecommendation(row.id, options.type === "keyword" ? normalizeKeywordReadout(response) : response);
+      ? await generateStructuredWithUserGeminiKey(userId, model, keywordReadoutPrompt(generationContext), keywordReadoutSchema, 5_000)
+      : await generateStructuredWithUserGeminiKey(userId, model, assetReadoutPrompt(generationContext, noveltyContext), assetReadoutSchema, 6_000);
+    const normalized = options.type === "keyword" ? normalizeKeywordReadout(response) : normalizeAssetReadout(response, context, context.filters.assetType === "videos" ? "video" : "image");
+    const recommendation = await completeAiRecommendation(row.id, normalized);
     return recommendation ? { recommendation, context } : null;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Gemini request failed";
@@ -283,9 +437,19 @@ export async function exportGlobalAiReadout(
     const header = ["rank", "keyword", "level", "label", "global_score", "demand_score", "competition_score", "trend", "research_count", "asset_count", "average_download_rank", "result_count", "confidence", "last_observed_at", "recommended_style", "style_rationale", "why_it_matters"];
     return [header, ...rows].map((row) => row.map(cell).join(",")).join("\n");
   }
-  const rows = data.assets.map((item, index) => [index + 1, item.title, item.assetUrl, item.thumbnailUrl, item.weightedScore, item.researchCount, item.bestDownloadRank, item.bestRelevanceRank, item.bestRecentRank, item.confidence, "", item.lastObservedAt]);
+  const assetRecommendations = Array.isArray(response?.recommendations) ? response.recommendations : [];
+  const assetReadoutFor = (item: any) => assetRecommendations.find((entry: any) => {
+    const ids = Array.isArray(entry?.sourceAssetIds) ? entry.sourceAssetIds.map((value: unknown) => String(value)) : [];
+    const urls = Array.isArray(entry?.sourceAssetUrls) ? entry.sourceAssetUrls.map((value: unknown) => String(value)) : [];
+    return ids.includes(String(item.externalId ?? "")) || urls.includes(String(item.assetUrl ?? ""));
+  });
+  const rows = data.assets.map((item, index) => {
+    const ai = assetReadoutFor(item);
+    const keywords = Array.isArray(ai?.keywordSuggestions) ? ai.keywordSuggestions.map((entry: any) => entry.keyword).join(" | ") : "";
+    return [index + 1, item.title, item.assetUrl, item.thumbnailUrl, item.weightedScore, item.researchCount, item.bestDownloadRank, item.bestRelevanceRank, item.bestRecentRank, item.confidence, keywords, ai?.recommendedStyle ?? "", item.lastObservedAt];
+  });
   if (format === "txt") return rows.map((row) => `${row[1]} — ${row[4] ?? "—"} — ${row[2]}`).join("\n");
-  const header = ["rank", "asset_title", "asset_url", "thumbnail_url", "asset_score", "research_count", "best_download_rank", "best_relevance_rank", "best_recent_rank", "confidence", "keywords", "observed_at"];
+  const header = ["rank", "asset_title", "asset_url", "thumbnail_url", "asset_score", "research_count", "best_download_rank", "best_relevance_rank", "best_recent_rank", "confidence", "keywords", "recommended_style", "observed_at"];
   return [header, ...rows].map((row) => row.map(cell).join(",")).join("\n");
 }
 

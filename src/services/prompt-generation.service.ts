@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { getDatabase } from "../db/client";
 import { aiRecommendations } from "../db/schema";
 import type { AuthContext } from "../auth";
@@ -48,6 +48,8 @@ type PromptInput = {
   count?: number;
   style?: string;
   model?: string;
+  generationSeed?: string;
+  generateAnother?: boolean;
 };
 
 function text(value: unknown, maxLength = MAX_TEXT) {
@@ -89,6 +91,12 @@ function publicPromptGeneration(row: typeof aiRecommendations.$inferSelect) {
     promptVersion: row.promptVersion,
     model: row.model,
     inputHash: row.inputHash,
+    generationGroupId: row.generationGroupId,
+    generationIndex: row.generationIndex,
+    generationSeed: row.generationSeed,
+    generationTitle: row.generationTitle,
+    outputType: row.outputType,
+    recommendedStyle: row.recommendedStyle,
     status: row.status,
     response: row.responseJson ? normalizePromptResponse(parseJson(row.responseJson)) : null,
     errorMessage: row.errorMessage,
@@ -137,6 +145,7 @@ function promptForContext(context: unknown, requestedCount: number, style: strin
     "Prompt harus siap copy-paste, konkret, mendeskripsikan subjek, aksi, setting, pencahayaan, komposisi, ruang copy space, dan kualitas stock yang bersih.",
     "Prioritaskan konsep komersial yang mudah diberi metadata dan hindari logo, merek, karakter berhak cipta, nama artis, watermark, teks acak, dan klaim penjualan.",
     "Setiap prompt harus memiliki angle visual berbeda. Jangan mengulang kalimat prompt.",
+    "Jika tersedia NOVELTY CONTEXT, buat angle baru dan jangan mengulang judul, keyword focus, atau konsep yang tercantum di sana.",
     "Negative prompt harus ringkas dan relevan untuk mengurangi artefak, teks, logo, watermark, anatomi buruk, dan duplikasi.",
     "Confidence hanya mengukur kekuatan evidence dari data, bukan jaminan gambar akan laku.",
     "Kembalikan hanya JSON sesuai schema, tanpa markdown.",
@@ -163,10 +172,40 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
   if (!rawContext) return null;
 
   const context = compactContext(rawContext, { seed, category, assetType, locale });
-  const inputHash = createHash("sha256")
+  const contextHash = createHash("sha256")
     .update(JSON.stringify({ scope: "prompt", promptVersion: IMAGE_PROMPT_VERSION, model, requestedCount, style, context }))
     .digest("hex");
+  const generationGroupId = `prompt-generation:${contextHash}`;
   const database = getDatabase();
+  const history = await database.select().from(aiRecommendations)
+    .where(and(eq(aiRecommendations.scope, "prompt"), eq(aiRecommendations.generationGroupId, generationGroupId)))
+    .orderBy(desc(aiRecommendations.generationIndex), desc(aiRecommendations.createdAt))
+    .limit(10);
+  const latest = history.find((item) => item.status === "completed");
+  if (!input.generateAnother && !input.generationSeed && latest) {
+    const generation = publicPromptGeneration(latest);
+    if (generation.response) await persistSavedPrompts(latest.id, auth, context, generation.response);
+    return { generation, context };
+  }
+  if (input.generateAnother && history.length >= 5) throw new Error("PROMPT_VARIATION_LIMIT");
+  const generationIndex = (history[0]?.generationIndex ?? 0) + 1;
+  const generationSeed = text(input.generationSeed, 80) || (generationIndex === 1 ? "base" : `variation-${randomUUID().slice(0, 8)}`);
+  const inputHash = createHash("sha256")
+    .update(JSON.stringify({ generationGroupId, generationIndex, generationSeed }))
+    .digest("hex");
+  const noveltyContext = {
+    previousGenerationCount: history.length,
+    excludedTitles: history.flatMap((item) => {
+      const response = parseJson(item.responseJson) as Record<string, any> | null;
+      return Array.isArray(response?.prompts) ? response.prompts.map((entry: any) => entry.title) : [];
+    }).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 100),
+    excludedKeywords: history.flatMap((item) => {
+      const response = parseJson(item.responseJson) as Record<string, any> | null;
+      return Array.isArray(response?.prompts) ? response.prompts.flatMap((entry: any) => Array.isArray(entry.keywordFocus) ? entry.keywordFocus : []) : [];
+    }).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 120)
+  };
+  const generationContext = { ...context, generation: { generationGroupId, generationIndex, generationSeed }, novelty: noveltyContext };
+  const generationTitle = `${seed || "Untitled"} · ${assetType === "videos" ? "Video" : "Image"} · ${style} · Variation ${generationIndex}`;
   const existing = await database.select().from(aiRecommendations).where(eq(aiRecommendations.inputHash, inputHash)).limit(1);
   if (existing[0]?.status === "completed") {
     const generation = publicPromptGeneration(existing[0]);
@@ -178,7 +217,7 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
   if (row) {
     const [updated] = await database.update(aiRecommendations).set({
       status: "pending",
-      requestJson: JSON.stringify(context),
+      requestJson: JSON.stringify(generationContext),
       responseJson: null,
       errorMessage: null,
       updatedAt: new Date(),
@@ -193,8 +232,15 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
       promptVersion: IMAGE_PROMPT_VERSION,
       model,
       inputHash,
+      contextHash,
+      generationGroupId,
+      generationIndex,
+      generationSeed,
+      generationTitle,
+      outputType: assetType === "videos" ? "video" : "image",
+      recommendedStyle: style,
       status: "pending",
-      requestJson: JSON.stringify(context)
+      requestJson: JSON.stringify(generationContext)
     }).returning();
     row = created;
   }
@@ -203,7 +249,7 @@ export async function generatePromptSet(userId: string, auth: AuthContext, input
     const response = await generateStructuredWithUserGeminiKey(
       userId,
       model,
-      promptForContext({ ...context, style }, requestedCount, style, assetType),
+      promptForContext({ ...generationContext, style }, requestedCount, style, assetType),
       imagePromptSchema,
       Math.min(8_000, 1_000 + requestedCount * 700)
     );

@@ -1,7 +1,7 @@
-import { and, desc, eq, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { getDatabase } from "../db/client";
-import { savedPrompts } from "../db/schema";
+import { aiRecommendations, savedPrompts } from "../db/schema";
 import type { AuthContext } from "../auth";
 
 export interface SavePromptInput {
@@ -56,6 +56,19 @@ export function publicSavedPrompt(row: typeof savedPrompts.$inferSelect) {
   };
 }
 
+export interface PublicPromptGenerationSet {
+  id: string;
+  title: string;
+  seed: string;
+  category: string;
+  assetType: string;
+  locale: string;
+  style: string;
+  createdAt: Date;
+  promptCount: number;
+  prompts: ReturnType<typeof publicSavedPrompt>[];
+}
+
 export async function saveGeneratedPrompts(input: SavePromptInput[]): Promise<void> {
   if (!input.length) return;
   const database = getDatabase();
@@ -97,6 +110,41 @@ export async function listSavedPrompts(limit = 100, auth?: AuthContext | null) {
   return rows.map(publicSavedPrompt);
 }
 
+export async function listPromptGenerationSets(limit = 100, auth?: AuthContext | null): Promise<PublicPromptGenerationSet[]> {
+  const prompts = await listSavedPrompts(Math.min(Math.max(limit * 20, 100), 1_000), auth);
+  const generationIds = [...new Set(prompts.map((item) => item.generationId).filter((id): id is string => Boolean(id)))];
+  const generations = generationIds.length
+    ? await getDatabase().select().from(aiRecommendations).where(inArray(aiRecommendations.id, generationIds))
+    : [];
+  const generationMap = new Map(generations.map((item) => [item.id, item]));
+  const groups = new Map<string, PublicPromptGenerationSet>();
+  for (const prompt of prompts) {
+    const id = prompt.generationId ?? `ungrouped-${prompt.createdAt.toISOString().slice(0, 10)}`;
+    const generation = prompt.generationId ? generationMap.get(prompt.generationId) : undefined;
+    const existing = groups.get(id);
+    if (existing) {
+      existing.prompts.push(prompt);
+      existing.promptCount = existing.prompts.length;
+      continue;
+    }
+    groups.set(id, {
+      id,
+      title: generation?.generationTitle || `${prompt.seed} · ${prompt.assetType === "videos" ? "Video" : "Image"} · ${prompt.createdAt.toLocaleDateString("en-GB")}`,
+      seed: prompt.seed,
+      category: prompt.category,
+      assetType: prompt.assetType,
+      locale: prompt.locale,
+      style: generation?.recommendedStyle || "",
+      createdAt: generation?.createdAt ?? new Date(prompt.createdAt),
+      promptCount: 1,
+      prompts: [prompt]
+    });
+  }
+  return [...groups.values()]
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, Math.min(Math.max(limit, 1), 100));
+}
+
 export async function deleteSavedPrompt(id: string, auth?: AuthContext | null) {
   const database = getDatabase();
   const scope = scopeCondition(auth);
@@ -107,13 +155,21 @@ export async function deleteSavedPrompt(id: string, auth?: AuthContext | null) {
   return result.length ? { deleted: true, promptId: id } : null;
 }
 
+export async function deletePromptGenerationSet(generationId: string, auth?: AuthContext | null) {
+  const scope = scopeCondition(auth);
+  const result = await getDatabase().delete(savedPrompts).where(
+    scope ? and(eq(savedPrompts.generationId, generationId), scope) : eq(savedPrompts.generationId, generationId)
+  ).returning({ id: savedPrompts.id });
+  return result.length ? { deleted: true, generationId, promptCount: result.length } : null;
+}
+
 function csvCell(value: unknown): string {
   const text = value === null || value === undefined ? "" : String(value);
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-export async function exportSavedPrompts(format: "csv" | "txt", auth?: AuthContext | null): Promise<string> {
-  const rows = await listSavedPrompts(1_000, auth);
+export async function exportSavedPrompts(format: "csv" | "txt", auth?: AuthContext | null, generationId?: string): Promise<string> {
+  const rows = (await listSavedPrompts(1_000, auth)).filter((row) => !generationId || row.generationId === generationId);
   if (format === "txt") return rows.map((row) => row.prompt.replace(/\r?\n/g, " ").trim()).join("\n");
 
   const header = ["id", "title", "prompt", "negative_prompt", "keyword_focus", "seed", "category", "asset_type", "locale", "status", "created_at"];
