@@ -21,7 +21,25 @@ function authOrThrow(request: { auth: import("../auth").AuthContext | null }) {
 }
 
 export async function seedDiscoveryRoutes(app: FastifyInstance): Promise<void> {
-  app.post<{ Body: CreateBody }>("/api/seed-discovery", async (request, reply) => {
+  app.post<{ Body: CreateBody }>(
+    "/api/seed-discovery",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            topic: { type: "string", maxLength: 120 },
+            category: { type: "string", minLength: 1, maxLength: 40 },
+            assetType: { type: "string", enum: ["images", "videos"] },
+            locale: { type: "string", minLength: 1, maxLength: 20 },
+            count: { type: "integer", minimum: 1, maximum: 50 },
+            model: { type: "string", minLength: 1, maxLength: 120 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
     const auth = authOrThrow(request);
     const result = await createSeedDiscoveryJob(auth.userId, auth, {
       topic: typeof request.body?.topic === "string" ? request.body.topic : undefined,

@@ -11,7 +11,22 @@ interface LoginBody {
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post<{ Body: LoginBody }>("/api/auth/login", async (request, reply) => {
+  app.post<{ Body: LoginBody }>(
+    "/api/auth/login",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["username", "password"],
+          properties: {
+            username: { type: "string", minLength: 1, maxLength: 120 },
+            password: { type: "string", minLength: 1, maxLength: 512 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
     const username = typeof request.body?.username === "string" ? request.body.username.trim() : "";
     const password = typeof request.body?.password === "string" ? request.body.password : "";
 

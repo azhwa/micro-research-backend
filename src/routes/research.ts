@@ -54,7 +54,24 @@ function positiveInteger(value: unknown, fallback: number): number {
 }
 
 export async function researchRoutes(app: FastifyInstance): Promise<void> {
-  app.post<{ Body: CreateQueueBody }>("/api/research-queue", async (request, reply) => {
+  app.post<{ Body: CreateQueueBody }>(
+    "/api/research-queue",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["keyword"],
+          properties: {
+            keyword: { type: "string", minLength: 1, maxLength: 120 },
+            category: { type: "string", minLength: 1, maxLength: 40 },
+            assetType: { type: "string", enum: ["images", "videos"] },
+            locale: { type: "string", minLength: 1, maxLength: 20 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
     const keyword = typeof request.body?.keyword === "string" ? request.body.keyword.trim() : "";
     if (!keyword || keyword.length > 120) {
       return reply.status(400).send({ error: "INVALID_KEYWORD", message: "keyword wajib diisi dan maksimal 120 karakter" });
@@ -70,8 +87,26 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(item);
   });
 
-  app.post<{ Body: CreateQueueBatchBody }>("/api/research-queue/batch", async (request, reply) => {
-    const rawItems = Array.isArray(request.body?.items) ? request.body.items.slice(0, 20) : [];
+  app.post<{ Body: CreateQueueBatchBody }>(
+    "/api/research-queue/batch",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["items"],
+          properties: {
+            items: { type: "array", minItems: 1, items: {} }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+    const batchBody = request.body as { items?: unknown } | null | undefined;
+    const batchItems = batchBody && typeof batchBody === "object" ? batchBody.items : undefined;
+    if (!Array.isArray(batchItems) || batchItems.length === 0) {
+      return reply.status(400).send({ error: "VALIDATION_ERROR", message: "Request tidak valid" });
+    }
+    const rawItems = batchItems.slice(0, 20);
     const rejected: Array<{ keyword: string; reason: string }> = [];
     if (Array.isArray(request.body?.items) && request.body.items.length > 20) rejected.push(...request.body.items.slice(20).map((item) => ({ keyword: item && typeof item === "object" && typeof (item as Record<string, unknown>).keyword === "string" ? (item as Record<string, string>).keyword : "", reason: "MAX_BATCH_20" })));
     const created = [];
@@ -85,6 +120,10 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
       if (!keyword || keyword.length > 120) { rejected.push({ keyword, reason: "INVALID_KEYWORD" }); continue; }
       const normalized = keyword.toLowerCase().replace(/\s+/g, " ");
       const category = typeof value.category === "string" && value.category.trim() ? value.category.trim().slice(0, 40) : "general";
+      if (value.assetType !== undefined && value.assetType !== "images" && value.assetType !== "videos") {
+        rejected.push({ keyword, reason: "INVALID_ASSET_TYPE" });
+        continue;
+      }
       const assetType = value.assetType === "videos" ? "videos" : "images";
       const locale = typeof value.locale === "string" && value.locale.trim() ? value.locale.trim() : "en-GB";
       const key = queueKey(normalized, category, assetType, locale);
@@ -127,6 +166,28 @@ export async function researchRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Body: CreateResearchBody }>(
     "/api/research-runs",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            keyword: { type: "string", maxLength: 120 },
+            category: { type: "string", minLength: 1, maxLength: 40 },
+            assetType: { type: "string", enum: ["images", "videos"] },
+            locale: { type: "string", minLength: 1, maxLength: 20 },
+            maxSuggestions: { type: "integer", minimum: 1, maximum: 50 },
+            assetsPerQuery: { type: "integer", minimum: 1, maximum: 100 },
+            autocompleteEnabled: { type: "boolean" },
+            mode: { type: "string", enum: ["fast", "full", "primary"] }
+          },
+          anyOf: [
+            { required: ["keyword"] },
+            { required: ["mode"], properties: { mode: { const: "primary" } } }
+          ]
+        }
+      }
+    },
     async (request, reply) => {
       const body = request.body ?? {};
       const requestedKeyword = typeof body.keyword === "string" ? body.keyword.trim() : "";

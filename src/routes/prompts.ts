@@ -41,12 +41,49 @@ function authOrThrow(request: { auth: import("../auth").AuthContext | null }) {
   return request.auth;
 }
 
-function normalizePromptQueueItems(body: PromptQueueBody) {
-  const rawItems = Array.isArray(body.items) ? body.items : [body];
-  return rawItems.map((item) => {
-    const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
-    return {
-      keyword: typeof value.keyword === "string" ? value.keyword : "",
+function normalizePromptQueueItems(body: PromptQueueBody, partialBatch = false) {
+  const requestedItems = Array.isArray(body.items) ? body.items : [body];
+  const rejected: Array<{ keyword: string; reason: string }> = [];
+  const rawItems = partialBatch ? requestedItems.slice(0, 20) : requestedItems;
+  if (partialBatch && requestedItems.length > 20) {
+    rejected.push(...requestedItems.slice(20).map((item) => ({
+      keyword: item && typeof item === "object" && typeof (item as Record<string, unknown>).keyword === "string"
+        ? (item as Record<string, string>).keyword
+        : "",
+      reason: "MAX_BATCH_20"
+    })));
+  }
+  const items = rawItems.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      if (partialBatch) rejected.push({ keyword: "", reason: "INVALID_ITEM" });
+      return partialBatch ? [] : [{ keyword: "" }];
+    }
+
+    const value = item as Record<string, unknown>;
+    const keyword = typeof value.keyword === "string" ? value.keyword.trim() : "";
+    if (partialBatch && (!keyword || keyword.length > 160)) {
+      rejected.push({ keyword, reason: "INVALID_KEYWORD" });
+      return [];
+    }
+    if (partialBatch && value.researchAssetType !== undefined && value.researchAssetType !== "images" && value.researchAssetType !== "videos") {
+      rejected.push({ keyword, reason: "INVALID_ASSET_TYPE" });
+      return [];
+    }
+    if (partialBatch && value.promptOutputType !== undefined && value.promptOutputType !== "image" && value.promptOutputType !== "video") {
+      rejected.push({ keyword, reason: "INVALID_OUTPUT_TYPE" });
+      return [];
+    }
+    if (partialBatch && value.promptCount !== undefined && (!Number.isInteger(value.promptCount) || (value.promptCount as number) < 1 || (value.promptCount as number) > 20)) {
+      rejected.push({ keyword, reason: "INVALID_PROMPT_COUNT" });
+      return [];
+    }
+    if (partialBatch && value.sourceObservedAt !== undefined && value.sourceObservedAt !== null && typeof value.sourceObservedAt !== "string") {
+      rejected.push({ keyword, reason: "INVALID_SOURCE_OBSERVED_AT" });
+      return [];
+    }
+
+    return [{
+      keyword,
       category: typeof value.category === "string" ? value.category : undefined,
       researchAssetType: value.researchAssetType === "videos" ? "videos" as const : "images" as const,
       promptOutputType: value.promptOutputType === "video" ? "video" as const : "image" as const,
@@ -60,14 +97,24 @@ function normalizePromptQueueItems(body: PromptQueueBody) {
       sourceConfidence: value.sourceConfidence === "low" || value.sourceConfidence === "medium" || value.sourceConfidence === "high" ? value.sourceConfidence as "low" | "medium" | "high" : undefined,
       sourceEvidence: Array.isArray(value.sourceEvidence) ? value.sourceEvidence.filter((entry): entry is string => typeof entry === "string") : undefined,
       sourceObservedAt: typeof value.sourceObservedAt === "string" ? value.sourceObservedAt : undefined
-    };
+    }];
   });
+  return { items, rejected };
 }
 
-async function createPromptQueueHandler(request: FastifyRequest<{ Body: PromptQueueBody }>, reply: FastifyReply) {
+async function createPromptQueueHandler(request: FastifyRequest<{ Body: PromptQueueBody }>, reply: FastifyReply, partialBatch = false) {
   const auth = authOrThrow(request);
+  if (partialBatch && (!Array.isArray(request.body?.items) || request.body.items.length === 0)) {
+    return reply.status(400).send({ error: "VALIDATION_ERROR", message: "Request tidak valid" });
+  }
   try {
-    return await createPromptQueueItems(normalizePromptQueueItems(request.body ?? {}), auth);
+    const normalized = normalizePromptQueueItems(request.body ?? {}, partialBatch);
+    const result = await createPromptQueueItems(normalized.items, auth);
+    return {
+      ...result,
+      rejected: [...normalized.rejected, ...result.rejected],
+      skipped: normalized.rejected.length + result.skipped
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Prompt queue gagal dibuat";
     return reply.status(400).send({ error: "PROMPT_QUEUE_INVALID", message });
@@ -79,8 +126,72 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
     return listPromptQueue(Number(request.query.limit ?? 100), authOrThrow(request));
   });
 
-  app.post<{ Body: PromptQueueBody }>("/api/prompt-queue", createPromptQueueHandler);
-  app.post<{ Body: PromptQueueBody }>("/api/prompt-queue/batch", createPromptQueueHandler);
+  const promptQueueSchema = {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        items: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["keyword"],
+            properties: {
+              keyword: { type: "string", minLength: 1, maxLength: 160 },
+              category: { type: "string", minLength: 1, maxLength: 40 },
+              researchAssetType: { type: "string", enum: ["images", "videos"] },
+              promptOutputType: { type: "string", enum: ["image", "video"] },
+              locale: { type: "string", minLength: 1, maxLength: 20 },
+              promptCount: { type: "integer", minimum: 1, maximum: 20 },
+              recommendedStyle: { type: "string", minLength: 1, maxLength: 160 },
+              styleRationale: { type: "string", maxLength: 500 },
+              sourceReadoutId: { type: "string", maxLength: 160 },
+              sourceScore: { type: "number" },
+              sourceLevel: { type: "number" },
+              sourceConfidence: { type: "string", enum: ["low", "medium", "high"] },
+              sourceEvidence: { type: "array", maxItems: 12, items: { type: "string", maxLength: 240 } },
+              sourceObservedAt: { anyOf: [{ type: "string", maxLength: 80 }, { type: "null" }] }
+            }
+          }
+        },
+        keyword: { type: "string", minLength: 1, maxLength: 160 },
+        category: { type: "string", minLength: 1, maxLength: 40 },
+        researchAssetType: { type: "string", enum: ["images", "videos"] },
+        promptOutputType: { type: "string", enum: ["image", "video"] },
+        locale: { type: "string", minLength: 1, maxLength: 20 },
+        promptCount: { type: "integer", minimum: 1, maximum: 20 },
+        recommendedStyle: { type: "string", minLength: 1, maxLength: 160 },
+        styleRationale: { type: "string", maxLength: 500 },
+        sourceReadoutId: { type: "string", maxLength: 160 },
+        sourceScore: { type: "number" },
+        sourceLevel: { type: "number" },
+        sourceConfidence: { type: "string", enum: ["low", "medium", "high"] },
+        sourceEvidence: { type: "array", maxItems: 12, items: { type: "string", maxLength: 240 } },
+        sourceObservedAt: { anyOf: [{ type: "string", maxLength: 80 }, { type: "null" }] }
+      },
+      anyOf: [{ required: ["keyword"] }, { required: ["items"] }]
+    }
+  };
+
+  const promptQueueBatchSchema = {
+    body: {
+      type: "object",
+      required: ["items"],
+      properties: {
+        items: { type: "array", minItems: 1, items: {} }
+      }
+    }
+  };
+
+  app.post<{ Body: PromptQueueBody }>("/api/prompt-queue", { schema: promptQueueSchema }, createPromptQueueHandler);
+  app.post<{ Body: PromptQueueBody }>(
+    "/api/prompt-queue/batch",
+    { schema: promptQueueBatchSchema },
+    async (request, reply) => createPromptQueueHandler(request, reply, true)
+  );
 
   app.patch<{ Params: { id: string }; Body: PromptQueueBody }>("/api/prompt-queue/:id", async (request, reply) => {
     const body = request.body ?? {};
@@ -157,7 +268,29 @@ export async function promptRoutes(app: FastifyInstance): Promise<void> {
     return result ?? reply.status(404).send({ error: "PROMPT_NOT_FOUND" });
   });
 
-  app.post<{ Body: CreateBody }>("/api/prompt-generations", async (request, reply) => {
+  app.post<{ Body: CreateBody }>(
+    "/api/prompt-generations",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            seed: { type: "string", minLength: 1, maxLength: 160 },
+            researchRunId: { type: "string", minLength: 1, maxLength: 160 },
+            category: { type: "string", minLength: 1, maxLength: 40 },
+            assetType: { type: "string", enum: ["images", "videos"] },
+            locale: { type: "string", minLength: 1, maxLength: 20 },
+            count: { type: "integer", minimum: 1, maximum: 20 },
+            style: { type: "string", minLength: 1, maxLength: 160 },
+            model: { type: "string", minLength: 1, maxLength: 120 },
+            generationSeed: { type: "string", minLength: 1, maxLength: 160 },
+            generateAnother: { type: "boolean" }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
     const auth = authOrThrow(request);
     const researchRunId = typeof request.body?.researchRunId === "string" ? request.body.researchRunId : undefined;
     if (researchRunId && !await getResearchRun(researchRunId, auth)) {

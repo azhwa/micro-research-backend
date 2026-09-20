@@ -19,7 +19,12 @@ import { authConfigured, env } from "./config/env";
 
 export function buildApp() {
   const app = Fastify({
-    logger: env.nodeEnv !== "test"
+    logger: env.nodeEnv !== "test",
+    ajv: {
+      customOptions: {
+        coerceTypes: false
+      }
+    }
   });
 
   app.register(cors, {
@@ -67,6 +72,15 @@ export function buildApp() {
   app.register(promptRoutes);
 
   app.setErrorHandler((error, request, reply) => {
+    const validationError = error as { code?: string; validation?: unknown };
+    if (validationError.code === "FST_ERR_VALIDATION") {
+      return reply.status(400).send({
+        error: "VALIDATION_ERROR",
+        message: "Request tidak valid",
+        details: validationError.validation
+      });
+    }
+
     request.log.error(
       {
         err: error,
