@@ -2,6 +2,12 @@
 
 Backend Microstock Research menggunakan Node.js, TypeScript, Fastify, Playwright, Crawlee, Drizzle, dan Turso.
 
+## Browser crawler
+
+Research memakai `PlaywrightCrawler` dengan CloakBrowser sebagai Chromium runtime. Mode default adalah `CRAWLER_BROWSER=cloak`, `PLAYWRIGHT_HEADLESS=true`, dan `CLOAKBROWSER_HUMANIZE=false`. Profile persisten disimpan di `storage/cloak-profile` agar cookie dan cache challenge Adobe dapat dipakai ulang.
+
+`PLAYWRIGHT_CDP_URL` hanya digunakan jika `CRAWLER_BROWSER=cdp` dipilih secara eksplisit. Dengan mode CloakBrowser, backend meluncurkan browser sendiri dan tidak membutuhkan service CDP eksternal.
+
 ## Menjalankan lokal
 
 ```bash

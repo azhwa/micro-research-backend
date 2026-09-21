@@ -1,0 +1,23 @@
+[Unit]
+Description=CDP health watchdog for Adobe Research Chromium
+After=adobe-browser.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ubuntu/micro-research-backend
+Environment=NODE_ENV=production
+Environment=CDP_URL=http://127.0.0.1:9222
+Environment=BROWSER_UNIT=adobe-browser.service
+Environment=CHECK_INTERVAL_MS=15000
+Environment=PROBE_TIMEOUT_MS=8000
+Environment=MAX_PAGE_TARGETS=8
+Environment=FAILURE_THRESHOLD=2
+Environment=RESTART_COOLDOWN_MS=60000
+ExecStart=/usr/bin/node /home/ubuntu/micro-research-backend/deploy/cdp-watchdog.mjs
+Restart=always
+RestartSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -48,8 +48,61 @@ import {
   appendResearchAssetBatchLog,
   appendResearchKeywordSummaryLog
 } from "../services/research-log.service";
+import {
+  buildCloakLaunchOptions,
+  bootstrapCloakBrowserProfile,
+  cloakBrowserProfilePath,
+  humanizeCloakBrowser
+} from "./cloakbrowser";
 
 export { applyStealthScripts } from "./adobe-stock.core";
+
+let cloakProfileBootstrapped = false;
+
+async function connectExternalCdp(
+  researchRunId: string,
+  cancellationSignal?: AbortSignal
+): Promise<Browser> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= env.playwrightCdpRetryCount; attempt += 1) {
+    throwIfResearchCancelled(cancellationSignal);
+    try {
+      const browser = await chromium.connectOverCDP(env.playwrightCdpUrl, {
+        timeout: env.playwrightCdpConnectTimeoutMs
+      });
+      if (attempt > 1) {
+        await appendResearchEvent(
+          researchRunId,
+          "info",
+          "crawler_cdp_reconnected",
+          `Koneksi CDP pulih pada percobaan ke-${attempt}`,
+          { attempt, maxAttempts: env.playwrightCdpRetryCount }
+        );
+      }
+      return browser;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= env.playwrightCdpRetryCount) break;
+
+      await appendResearchEvent(
+        researchRunId,
+        "warning",
+        "crawler_cdp_connect_retry",
+        `CDP belum siap; koneksi akan diulang (${attempt}/${env.playwrightCdpRetryCount}): ${message}`,
+        { attempt, maxAttempts: env.playwrightCdpRetryCount, retryDelayMs: env.playwrightCdpRetryDelayMs }
+      );
+      await new Promise((resolve) => setTimeout(resolve, env.playwrightCdpRetryDelayMs));
+    }
+  }
+
+  const message = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `CDP tidak siap setelah ${env.playwrightCdpRetryCount} percobaan: ${message}`,
+    { cause: lastError }
+  );
+}
 
 export async function runAdobeResearch(researchRunId: string, hooks: ResearchHooks = {}): Promise<void> {
   const run = await getResearchRun(researchRunId);
@@ -100,14 +153,22 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     researchRunId,
     "info",
     "crawler_browser_mode",
-    `Browser crawler: ${env.playwrightHeadless ? "headless" : "headed"}`,
-    { headless: env.playwrightHeadless, display: process.env.DISPLAY ?? null }
+    `Browser crawler: ${env.crawlerBrowser}`,
+    {
+      browser: env.crawlerBrowser,
+      headless: env.playwrightHeadless,
+      display: process.env.DISPLAY ?? null,
+      profileDir: env.crawlerBrowser === "cloak" ? cloakBrowserProfilePath() : null
+    }
   );
 
   const executeScrapingSession = async (page: Page) => {
     activePages.add(page);
     try {
-      await applyStealthScripts(page);
+      // CloakBrowser already patches the fingerprint at the browser level.
+      // The legacy page-level patches can overwrite those values and make
+      // the initial Adobe/DataDome session challenge less reliable.
+      if (env.crawlerBrowser !== "cloak") await applyStealthScripts(page);
       requestHandled = true;
       const scrapingLocation = await collectScrapingLocation(page);
       const locationLabel = [
@@ -437,7 +498,10 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     }
     };
 
-    if (env.playwrightCdpUrl) {
+    if (env.crawlerBrowser === "cdp") {
+      if (!env.playwrightCdpUrl) {
+        throw new Error("CRAWLER_BROWSER=cdp membutuhkan PLAYWRIGHT_CDP_URL");
+      }
       await appendResearchEvent(
         researchRunId,
         "info",
@@ -447,9 +511,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       );
       let browser: Browser | null = null;
       try {
-        browser = await chromium.connectOverCDP(env.playwrightCdpUrl, {
-          timeout: env.playwrightCdpConnectTimeoutMs
-        });
+        browser = await connectExternalCdp(researchRunId, cancellationSignal);
         const context = browser.contexts()[0] || (await browser.newContext({
           viewport: { width: 1920, height: 1080 }
         }));
@@ -488,31 +550,75 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       return;
     }
 
+    const cloakLaunchOptions = env.crawlerBrowser === "cloak"
+      ? await buildCloakLaunchOptions(selectedProxy?.proxy)
+      : undefined;
+
+    if (env.crawlerBrowser === "cloak" && !cloakProfileBootstrapped) {
+      const bootstrap = await bootstrapCloakBrowserProfile(
+        searchPageUrl(run.assetType, run.locale),
+        selectedProxy?.proxy,
+        Math.max(navigationTimeout, 30_000)
+      );
+      await appendResearchEvent(
+        researchRunId,
+        bootstrap.searchInputReady ? "info" : "warning",
+        "cloak_profile_bootstrap",
+        bootstrap.searchInputReady
+          ? "Profile CloakBrowser berhasil dipanaskan; session Adobe siap dipakai Crawlee"
+          : "Profile CloakBrowser sudah dipanaskan, tetapi challenge Adobe belum selesai; Crawlee akan melanjutkan dengan profile yang sama",
+        {
+          httpStatus: bootstrap.httpStatus,
+          title: bootstrap.title,
+          url: bootstrap.url,
+          searchInputReady: bootstrap.searchInputReady,
+          profileDir: cloakBrowserProfilePath()
+        }
+      );
+      cloakProfileBootstrapped = bootstrap.searchInputReady;
+    }
+
     const crawler = new PlaywrightCrawler({
       maxConcurrency: 1,
       maxRequestsPerCrawl: 1,
       useSessionPool: false,
       requestHandlerTimeoutSecs: 900,
       launchContext: {
-        launchOptions: {
-          headless: env.playwrightHeadless,
-          args: [
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-infobars",
-            "--disable-blink-features=AutomationControlled",
-            "--window-size=1920,1080"
-          ],
-          ignoreDefaultArgs: ["--enable-automation"],
-          ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
-        }
+        ...(env.crawlerBrowser === "cloak"
+          ? {
+              userDataDir: cloakBrowserProfilePath(),
+              launchOptions: cloakLaunchOptions
+            }
+          : {
+              launchOptions: {
+                headless: env.playwrightHeadless,
+                args: [
+                  "--disable-dev-shm-usage",
+                  "--disable-gpu",
+                  "--no-sandbox",
+                  "--disable-infobars",
+                  "--disable-blink-features=AutomationControlled",
+                  "--window-size=1920,1080"
+                ],
+                ignoreDefaultArgs: ["--enable-automation"],
+                ...(selectedProxy ? { proxy: selectedProxy.proxy } : {})
+              }
+            })
       },
-      preNavigationHooks: [
-        async ({ page }) => {
-          await applyStealthScripts(page);
-        }
-      ],
+      browserPoolOptions: env.crawlerBrowser === "cloak" && env.cloakBrowserHumanize
+        ? {
+            postLaunchHooks: [async (_pageId, browserController) => {
+              await humanizeCloakBrowser(browserController.browser as unknown as Browser);
+            }]
+          }
+        : undefined,
+      preNavigationHooks: env.crawlerBrowser === "cloak"
+        ? []
+        : [
+            async ({ page }) => {
+              await applyStealthScripts(page);
+            }
+          ],
       failedRequestHandler: async ({ request, error }) => {
         const failureType = classifyFailure(error);
         await appendResearchEvent(

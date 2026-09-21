@@ -31,13 +31,28 @@ function parseDatabaseDriver(value: string | undefined): "local" | "turso" {
   return driver;
 }
 
+function parseCrawlerBrowser(value: string | undefined): "cloak" | "playwright" | "cdp" {
+  const browser = value?.trim().toLowerCase() ?? "cloak";
+  if (browser !== "cloak" && browser !== "playwright" && browser !== "cdp") {
+    throw new Error("CRAWLER_BROWSER harus bernilai cloak, playwright, atau cdp");
+  }
+  return browser;
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parsePort(process.env.PORT),
   host: process.env.HOST ?? "127.0.0.1",
+  crawlerBrowser: parseCrawlerBrowser(process.env.CRAWLER_BROWSER),
   playwrightHeadless: parseBoolean(process.env.PLAYWRIGHT_HEADLESS, true),
+  cloakBrowserProfileDir: process.env.CLOAKBROWSER_PROFILE_DIR?.trim() || "storage/cloak-profile",
+  cloakBrowserHumanize: parseBoolean(process.env.CLOAKBROWSER_HUMANIZE, false),
+  cloakBrowserLocale: process.env.CLOAKBROWSER_LOCALE?.trim() || "en-US",
+  cloakBrowserTimezone: process.env.CLOAKBROWSER_TIMEZONE?.trim() || "",
   playwrightCdpUrl: process.env.PLAYWRIGHT_CDP_URL?.trim() ?? "",
   playwrightCdpConnectTimeoutMs: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_CONNECT_TIMEOUT_MS, 30_000, 120_000),
+  playwrightCdpRetryCount: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_RETRY_COUNT, 5, 10),
+  playwrightCdpRetryDelayMs: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_RETRY_DELAY_MS, 5_000, 30_000),
   researchTimeoutMs: parsePositiveInteger(process.env.RESEARCH_TIMEOUT_MINUTES, 45, 180) * 60_000,
   workerConcurrency: parsePositiveInteger(process.env.WORKER_CONCURRENCY, 1, 10),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",

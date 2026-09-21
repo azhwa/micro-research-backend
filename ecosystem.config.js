@@ -24,7 +24,10 @@ module.exports = {
         HOST: "0.0.0.0",
         PORT: 3315,
         DISPLAY: ":99",
-        PLAYWRIGHT_HEADLESS: "false"
+        CRAWLER_BROWSER: "cloak",
+        PLAYWRIGHT_HEADLESS: "true",
+        CLOAKBROWSER_PROFILE_DIR: "storage/cloak-profile",
+        CLOAKBROWSER_HUMANIZE: "false"
       }
     }
   ]
