@@ -25,6 +25,9 @@ module.exports = {
         PORT: 3315,
         DISPLAY: ":99",
         CRAWLER_BROWSER: "cloak",
+        // Crawlee otherwise uses 25% of host RAM as its local memory budget.
+        // Reserve a controlled 4 GB budget for the browser crawler instead.
+        CRAWLEE_MEMORY_MBYTES: "4096",
         PLAYWRIGHT_HEADLESS: "true",
         // Reuse the profile that previously passed Adobe's geo/DataDome
         // bootstrap. CDP is disabled; Cloak owns this profile now.
