@@ -23,6 +23,12 @@ function parsePositiveInteger(value: string | undefined, fallback: number, max =
   return Math.min(parsed, max);
 }
 
+function parseNonNegativeInteger(value: string | undefined, fallback: number, max = 10): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, max);
+}
+
 function parseDatabaseDriver(value: string | undefined): "local" | "turso" {
   const driver = value?.trim().toLowerCase() ?? "turso";
   if (driver !== "local" && driver !== "turso") {
@@ -44,6 +50,7 @@ export const env = {
   port: parsePort(process.env.PORT),
   host: process.env.HOST ?? "127.0.0.1",
   crawlerBrowser: parseCrawlerBrowser(process.env.CRAWLER_BROWSER),
+  crawlerBlockHeavyResources: parseBoolean(process.env.CRAWLER_BLOCK_HEAVY_RESOURCES, true),
   playwrightHeadless: parseBoolean(process.env.PLAYWRIGHT_HEADLESS, true),
   cloakBrowserProfileDir: process.env.CLOAKBROWSER_PROFILE_DIR?.trim() || "storage/cloak-profile",
   cloakBrowserHumanize: parseBoolean(process.env.CLOAKBROWSER_HUMANIZE, false),
@@ -53,6 +60,36 @@ export const env = {
   playwrightCdpConnectTimeoutMs: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_CONNECT_TIMEOUT_MS, 30_000, 120_000),
   playwrightCdpRetryCount: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_RETRY_COUNT, 5, 10),
   playwrightCdpRetryDelayMs: parsePositiveInteger(process.env.PLAYWRIGHT_CDP_RETRY_DELAY_MS, 5_000, 30_000),
+  researchDetailNavigationTimeoutMs: parsePositiveInteger(
+    process.env.RESEARCH_DETAIL_NAVIGATION_TIMEOUT_MS,
+    20_000,
+    120_000
+  ),
+  researchDetailSelectorTimeoutMs: parsePositiveInteger(
+    process.env.RESEARCH_DETAIL_SELECTOR_TIMEOUT_MS,
+    10_000,
+    120_000
+  ),
+  researchKeywordCacheHours: parsePositiveInteger(
+    process.env.RESEARCH_KEYWORD_CACHE_HOURS,
+    72,
+    24 * 90
+  ),
+  researchQueryMaxAttempts: parsePositiveInteger(
+    process.env.RESEARCH_QUERY_MAX_ATTEMPTS,
+    2,
+    3
+  ),
+  researchJobMaxAttempts: parsePositiveInteger(
+    process.env.RESEARCH_JOB_MAX_ATTEMPTS,
+    3,
+    5
+  ),
+  researchCrawlerRequestRetries: parseNonNegativeInteger(
+    process.env.RESEARCH_CRAWLER_REQUEST_RETRIES,
+    0,
+    3
+  ),
   researchTimeoutMs: parsePositiveInteger(process.env.RESEARCH_TIMEOUT_MINUTES, 45, 180) * 60_000,
   workerConcurrency: parsePositiveInteger(process.env.WORKER_CONCURRENCY, 1, 10),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",

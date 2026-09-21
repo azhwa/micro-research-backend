@@ -13,7 +13,6 @@ import { flushResearchDetailLog } from "../services/research-log.service";
 
 const POLL_INTERVAL_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const MAX_ATTEMPTS = 3;
 const STALE_JOB_MS = 20 * 60 * 1_000;
 
 class ResearchWorker {
@@ -148,10 +147,6 @@ class ResearchWorker {
             .update(researchJobs)
             .set({ lockedAt: now, heartbeatAt: now, updatedAt: now })
             .where(eq(researchJobs.id, job.id));
-          await database
-            .update(researchRuns)
-            .set({ progressCompleted: completed })
-            .where(eq(researchRuns.id, job.researchRunId));
         }
       });
       const finishedRun = await getResearchRun(job.researchRunId);
@@ -206,14 +201,15 @@ class ResearchWorker {
           .where(eq(researchJobs.id, job.id));
         return;
       }
-      const shouldRetry = job.attempts < MAX_ATTEMPTS;
+      const attemptNumber = job.attempts + 1;
+      const shouldRetry = attemptNumber < env.researchJobMaxAttempts;
       if (shouldRetry) {
         await appendResearchEvent(
           job.researchRunId,
           "warning",
           "job_retry_scheduled",
-          `Research gagal dan akan dicoba ulang (${job.attempts}/${MAX_ATTEMPTS}): ${message}`,
-          { attempt: job.attempts, maxAttempts: MAX_ATTEMPTS }
+          `Research gagal dan akan dicoba ulang (${attemptNumber}/${env.researchJobMaxAttempts}): ${message}`,
+          { attempt: attemptNumber, maxAttempts: env.researchJobMaxAttempts }
         );
         await database
           .update(researchRuns)

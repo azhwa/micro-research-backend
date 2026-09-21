@@ -373,6 +373,44 @@ export async function currentAdobeSearchState(page: Page): Promise<{ query: stri
   }).catch(() => ({ query: "", sort: null }));
 }
 
+function readAdobeResultSignature(selector: string): string {
+  const nodes = document.querySelectorAll(selector);
+  let signature = String(nodes.length);
+  const sampleSize = Math.min(nodes.length, 8);
+  for (let index = 0; index < sampleSize; index += 1) {
+    signature += `|${nodes[index].getAttribute("data-content-id") || ""}`;
+  }
+  return signature;
+}
+
+async function waitForAdobeResultStability(
+  page: Page,
+  initialSignature: string,
+  timeoutMs: number
+): Promise<void> {
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let previousSignature = "";
+  let stableRounds = 0;
+
+  while (Date.now() < deadline) {
+    const signature = await page
+      .evaluate(readAdobeResultSignature, ADOBE_RESULT_SELECTOR)
+      .catch(() => "");
+    const changedFromInitial = Boolean(signature) && signature !== initialSignature;
+    const minimumWaitElapsed = Date.now() - startedAt >= 300;
+
+    if (signature && (changedFromInitial || minimumWaitElapsed)) {
+      stableRounds = signature === previousSignature ? stableRounds + 1 : 0;
+      if (stableRounds >= 2) return;
+    } else {
+      stableRounds = 0;
+    }
+    previousSignature = signature;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 export async function prepareAdobeQuery(
   page: Page,
   query: string,
@@ -415,35 +453,32 @@ export async function prepareAdobeQuery(
 
   if (!isPageOne) {
     const input = page.locator(AUTOCOMPLETE_INPUT_SELECTOR).first();
-    if (currentState.query === query.trim().toLowerCase() && currentState.sort) {
-      const response = await page.reload({
-        waitUntil: "domcontentloaded",
-        timeout: navigationTimeout
-      });
-      httpStatus = response?.status() ?? httpStatus;
-      searchInputReady = await waitForAdobeSearchInput(page);
-    }
     if (!searchInputReady) {
       throw new CrawlerStageError(
         `Input pencarian Adobe belum siap pada ${page.url()}`,
         "selector_timeout"
       );
     }
-    try {
-      await input.fill(query);
-      await input.press("Enter");
-      await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
-    } catch (error) {
-      throw new CrawlerStageError(
-        `Input pencarian Adobe tidak dapat digunakan pada ${page.url()}: ${errorMessage(error)}`,
-        classifyFailure(error) === "timeout" ? "selector_timeout" : "navigation_error"
-      );
-    }
-    if (!await waitForAdobeSearchInput(page, Math.min(navigationTimeout, ADOBE_CHALLENGE_WAIT_MS))) {
-      throw new CrawlerStageError(
-        `Hasil pencarian Adobe belum siap pada ${page.url()}`,
-        "navigation_error"
-      );
+    // Keep the current result page when only the sort changes. Re-entering
+    // the same query causes an unnecessary navigation and can restart Adobe's
+    // challenge/session state for every sort mode.
+    if (currentState.query !== query.trim().toLowerCase()) {
+      try {
+        await input.fill(query);
+        await input.press("Enter");
+        await page.waitForLoadState("domcontentloaded", { timeout: navigationTimeout }).catch(() => undefined);
+      } catch (error) {
+        throw new CrawlerStageError(
+          `Input pencarian Adobe tidak dapat digunakan pada ${page.url()}: ${errorMessage(error)}`,
+          classifyFailure(error) === "timeout" ? "selector_timeout" : "navigation_error"
+        );
+      }
+      if (!await waitForAdobeSearchInput(page, Math.min(navigationTimeout, ADOBE_CHALLENGE_WAIT_MS))) {
+        throw new CrawlerStageError(
+          `Hasil pencarian Adobe belum siap pada ${page.url()}`,
+          "navigation_error"
+        );
+      }
     }
   }
 
@@ -465,6 +500,9 @@ export async function settleAdobeSort(
     try {
       await sortSelect.waitFor({ state: "visible", timeout: Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS) });
       const initialSortState = await readAdobeSortState(page, sortValue, query);
+      const initialResultSignature = await page
+        .evaluate(readAdobeResultSignature, ADOBE_RESULT_SELECTOR)
+        .catch(() => "");
       const sortTimeout = attempt === 1
         ? Math.min(selectorTimeout, 8_000)
         : Math.max(selectorTimeout, ADOBE_CHALLENGE_WAIT_MS);
@@ -477,7 +515,8 @@ export async function settleAdobeSort(
         resultSelectorTimeout,
         !(initialSortState.value === sortValue
           && initialSortState.urlSort === sortValue
-          && initialSortState.queryMatches)
+          && initialSortState.queryMatches),
+        initialResultSignature
       );
       if (!resultReady) {
         throw new Error(`Hasil Adobe belum siap setelah sort '${sortValue}'`);
@@ -512,7 +551,8 @@ export async function waitForAdobeResults(
   query: string,
   sortValue: string,
   timeoutMs: number,
-  requireEnabled: boolean
+  requireEnabled: boolean,
+  initialResultSignature = ""
 ): Promise<boolean> {
   return page
     .waitForFunction(
@@ -536,9 +576,10 @@ export async function waitForAdobeResults(
       { timeout: timeoutMs }
     )
     .then(async () => {
-      // Adobe replaces the result cards after the control becomes enabled.
-      // Give the SPA one short paint cycle before extraction begins.
-      await page.waitForTimeout(750);
+      // Adobe replaces result cards asynchronously after the sort state
+      // changes. Continue as soon as the card signature settles instead of
+      // sleeping for a fixed duration.
+      await waitForAdobeResultStability(page, initialResultSignature, 2_000);
       return true;
     })
     .catch(() => false);
@@ -623,11 +664,26 @@ export interface ScrapingLocation {
   lookupError?: string;
 }
 
+const SCRAPING_LOCATION_CACHE_TTL_MS = 10 * 60_000;
+const scrapingLocationCache = new Map<
+  string,
+  { value: ScrapingLocation; expiresAt: number }
+>();
+
 /**
  * Resolve the public egress IP from inside the Playwright context. A
  * Node-side request could bypass the browser proxy and report the VPS IP.
  */
-export async function collectScrapingLocation(page: Page): Promise<ScrapingLocation> {
+export async function collectScrapingLocation(
+  page: Page,
+  cacheKey = "direct"
+): Promise<ScrapingLocation> {
+  const cached = scrapingLocationCache.get(cacheKey);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) return cached.value;
+    scrapingLocationCache.delete(cacheKey);
+  }
+
   let probe: Page | null = null;
   let httpStatus: number | null = null;
 
@@ -649,7 +705,7 @@ export async function collectScrapingLocation(page: Page): Promise<ScrapingLocat
       ? payload.connection as Record<string, unknown>
       : {};
 
-    return {
+    const location: ScrapingLocation = {
       ip: stringValue(payload.ip),
       country: stringValue(payload.country),
       countryCode: stringValue(payload.country_code),
@@ -661,6 +717,11 @@ export async function collectScrapingLocation(page: Page): Promise<ScrapingLocat
       longitude: numberValue(payload.longitude),
       httpStatus
     };
+    scrapingLocationCache.set(cacheKey, {
+      value: location,
+      expiresAt: Date.now() + SCRAPING_LOCATION_CACHE_TTL_MS
+    });
+    return location;
   } catch (error) {
     return {
       ip: null,

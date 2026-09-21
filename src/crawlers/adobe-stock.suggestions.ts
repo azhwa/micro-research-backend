@@ -1,8 +1,7 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import { appendResearchEvent } from "../services/research.service";
 import {
   AUTOCOMPLETE_INPUT_SELECTOR,
-  AUTOCOMPLETE_ITEM_SELECTOR,
   AUTOCOMPLETE_PANEL_SELECTOR,
   classifyFailure,
   diagnosticMetadata,
@@ -10,6 +9,68 @@ import {
   randomJitter,
   type PageDiagnostics
 } from "./adobe-stock.core";
+
+async function typeAdobeAutocomplete({ selector, value }: { selector: string; value: string }): Promise<void> {
+  const element = document.querySelector(selector) as HTMLInputElement | null;
+  if (!element) throw new Error("Autocomplete input tidak ditemukan saat typing");
+  element.focus();
+  element.value = "";
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  for (const character of value) {
+    element.value += character;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    const typingDelay = Math.floor(Math.random() * (130 - 60 + 1)) + 60;
+    await new Promise<void>(function(resolve) {
+      setTimeout(resolve, typingDelay);
+    });
+  }
+}
+
+async function waitForStableAutocompletePanel(
+  input: Locator,
+  panel: Locator,
+  prefix: string,
+  seed: string,
+  max: number,
+  timeout: number
+): Promise<string[]> {
+  const startedAt = Date.now();
+  const deadline = startedAt + timeout;
+  const normalizedSeed = seed.trim().toLowerCase();
+  let previousSignature = "";
+  let stableRounds = 0;
+
+  while (Date.now() < deadline) {
+    const inputValue = await input.inputValue().catch(() => "");
+    const panelVisible = await panel.isVisible().catch(() => false);
+    const values = panelVisible
+      ? (await panel.locator('li, [role="option"]').allTextContents().catch(() => []))
+          .map((value) => value.trim())
+          .filter(Boolean)
+      : [];
+    const relevantValues = values.filter((value) => value.toLowerCase().includes(normalizedSeed));
+    const minimumRelevantValues = Math.min(2, Math.max(1, max));
+    const signature = values.join("\u001f");
+    const hasSettledLongEnough = Date.now() - startedAt >= 450;
+
+    if (
+      inputValue === prefix &&
+      panelVisible &&
+      relevantValues.length >= minimumRelevantValues &&
+      hasSettledLongEnough
+    ) {
+      stableRounds = signature === previousSignature ? stableRounds + 1 : 0;
+      if (stableRounds >= 2) return relevantValues;
+    } else {
+      stableRounds = 0;
+    }
+
+    previousSignature = signature;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Panel autocomplete belum stabil untuk prefix "${prefix}"`);
+}
 
 export async function collectSuggestions(
   page: Page,
@@ -73,25 +134,23 @@ export async function collectSuggestions(
       // The extension types into the existing Adobe input and emits input
       // events. Use the same value mutation and input dispatch as the
       // extension; keyboard events can be ignored by Adobe's search handler.
-      await page.evaluate(async ({ selector, value }) => {
-        const element = document.querySelector(selector) as HTMLInputElement | null;
-        if (!element) throw new Error("Autocomplete input tidak ditemukan saat typing");
-        element.focus();
-        element.value = "";
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        for (const character of value) {
-          element.value += character;
-          element.dispatchEvent(new Event("input", { bubbles: true }));
-          const typingDelay = Math.floor(Math.random() * (130 - 60 + 1)) + 60;
-          await new Promise((resolve) => setTimeout(resolve, typingDelay));
-        }
-      }, { selector: AUTOCOMPLETE_INPUT_SELECTOR, value: prefix });
+      await page.evaluate(typeAdobeAutocomplete, {
+        selector: AUTOCOMPLETE_INPUT_SELECTOR,
+        value: prefix
+      });
 
       const panel = page.locator(AUTOCOMPLETE_PANEL_SELECTOR).first();
-      const panelItems = panel.locator("li, [role=\"option\"]").first();
       let panelFound = false;
+      let values: string[] = [];
       try {
-        await panelItems.waitFor({ state: "visible", timeout: 3_000 });
+        values = await waitForStableAutocompletePanel(
+          input,
+          panel,
+          prefix,
+          seed,
+          max,
+          5_000
+        );
         panelFound = true;
         emptyPanelStreak = 0;
         await appendResearchEvent(
@@ -118,8 +177,6 @@ export async function collectSuggestions(
       }
 
       if (!panelFound) continue;
-
-      const values = await page.locator(AUTOCOMPLETE_ITEM_SELECTOR).allTextContents();
 
       values
         .map((value) => value.trim())

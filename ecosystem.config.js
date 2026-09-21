@@ -30,8 +30,8 @@ module.exports = {
         CRAWLEE_MEMORY_MBYTES: "5120",
         PLAYWRIGHT_HEADLESS: "true",
         PLAYWRIGHT_CDP_URL: "http://127.0.0.1:9222",
-        // Reuse the profile that previously passed Adobe's geo/DataDome
-        // bootstrap. CDP is disabled; Cloak owns this profile now.
+        // CDP attaches to the externally managed Adobe Chromium session
+        // so the existing challenge-cleared profile can be reused.
         CLOAKBROWSER_PROFILE_DIR: "/home/ubuntu/snap/chromium/common/adobe-profile",
         CLOAKBROWSER_HUMANIZE: "false"
       }

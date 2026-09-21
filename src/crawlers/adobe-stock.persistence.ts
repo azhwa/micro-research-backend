@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { getDatabase } from "../db/client";
+import { env } from "../config/env";
 import {
   assetObservations,
   assetKeywords,
@@ -24,6 +25,193 @@ import {
   type SortMode,
   CrawlerStageError
 } from "./adobe-stock.core";
+
+function extractAdobeKeywordRows(): Array<{ keyword: string; position: number }> {
+  const section = document.querySelector('[data-t="keywords-section"]');
+  if (!section) return [];
+
+  const rows: Array<{ keyword: string; position: number }> = [];
+  const elements = section.querySelectorAll('[data-t^="similar-keyword-item-"]');
+  for (let index = 0; index < elements.length; index += 1) {
+    const element = elements[index];
+    const keyword = (element.getAttribute("aria-label") || element.textContent || "").trim();
+    if (keyword && !/^\d+$/.test(keyword)) {
+      rows.push({ keyword, position: rows.length + 1 });
+    }
+  }
+
+  // Search-result detail uses a side panel. Its keyword links do not have
+  // the data-t attribute used by the standalone detail page, but Adobe marks
+  // them with load_type=tagged in the href.
+  if (rows.length > 0) return rows;
+  const links = section.querySelectorAll("a[href]");
+  const seen = new Set<string>();
+  for (let index = 0; index < links.length; index += 1) {
+    const link = links[index];
+    const href = link.getAttribute("href") || "";
+    const keyword = (link.textContent || "").trim();
+    const key = keyword.toLowerCase();
+    if (
+      !keyword ||
+      !href.includes("load_type=tagged") ||
+      /^view all$/i.test(keyword) ||
+      seen.has(key)
+    ) {
+      continue;
+    }
+    seen.add(key);
+    rows.push({ keyword, position: rows.length + 1 });
+  }
+  return rows;
+}
+
+function hasAdobeKeywordRows(): boolean {
+  const section = document.querySelector('[data-t="keywords-section"]');
+  if (!section) return false;
+  if (section.querySelector('[data-t^="similar-keyword-item-"]')) return true;
+  const links = section.querySelectorAll("a[href]");
+  for (let index = 0; index < links.length; index += 1) {
+    const href = links[index].getAttribute("href") || "";
+    const keyword = (links[index].textContent || "").trim();
+    if (keyword && href.includes("load_type=tagged")) return true;
+  }
+  return false;
+}
+
+export async function closeAdobeDetailPanel(page: Page, timeout: number): Promise<void> {
+  const closeTimeout = Math.min(timeout, 3_000);
+  const closeButton = page.locator("button.js-details-close-button").first();
+  if (await closeButton.count()) {
+    await closeButton.click({ timeout: closeTimeout }).catch(() => undefined);
+  }
+  await page
+    .locator('[data-t="detail-panel-file-id"]')
+    .first()
+    .waitFor({ state: "hidden", timeout: closeTimeout })
+    .catch(() => undefined);
+}
+
+async function clickAdobeAssetCard(
+  page: Page,
+  item: CollectedAsset,
+  timeout: number
+): Promise<void> {
+  const card = page
+    .locator(
+      `a[href][data-content-id="${item.externalId}"], [data-content-id="${item.externalId}"] a[href]`
+    )
+    .first();
+  await card.waitFor({ state: "attached", timeout });
+  await card.scrollIntoViewIfNeeded({ timeout });
+  await card.click({ timeout });
+}
+
+async function waitForAdobeAssetPanel(
+  page: Page,
+  externalId: string,
+  timeout: number
+): Promise<boolean> {
+  return page
+    .locator(`[data-t="detail-panel-file-id"][data-content-id="${externalId}"]`)
+    .first()
+    .waitFor({ state: "visible", timeout })
+    .then(() => true)
+    .catch(() => false);
+}
+
+export type PersistedKeywordRow = {
+  keyword: string;
+  normalizedKeyword: string;
+  source: string;
+  position: number;
+};
+
+async function persistAssetKeywordRows(
+  researchRunId: string,
+  assetId: string,
+  rows: PersistedKeywordRow[]
+): Promise<void> {
+  const database = getDatabase();
+  const keywordValues = rows.map((row) => ({
+    id: makeStableId(
+      "asset-keyword",
+      researchRunId,
+      assetId,
+      row.normalizedKeyword,
+      row.source
+    ),
+    researchRunId,
+    assetId,
+    keyword: row.keyword,
+    normalizedKeyword: row.normalizedKeyword,
+    source: row.source,
+    position: row.position
+  }));
+
+  for (const batch of chunks(keywordValues)) {
+    await database.insert(assetKeywords).values(batch).onConflictDoNothing();
+  }
+}
+
+async function readRecentCachedKeywords(
+  database: ReturnType<typeof getDatabase>,
+  assetIds: string[]
+): Promise<Map<string, PersistedKeywordRow[]>> {
+  const uniqueAssetIds = [...new Set(assetIds)].filter(Boolean);
+  const cachedByAssetId = new Map<string, PersistedKeywordRow[]>();
+  if (!uniqueAssetIds.length) return cachedByAssetId;
+
+  const cacheCutoff = new Date(
+    Date.now() - env.researchKeywordCacheHours * 60 * 60 * 1_000
+  );
+  const rows = await database
+    .select({
+      assetId: assetKeywords.assetId,
+      keyword: assetKeywords.keyword,
+      normalizedKeyword: assetKeywords.normalizedKeyword,
+      source: assetKeywords.source,
+      position: assetKeywords.position
+    })
+    .from(assetKeywords)
+    .where(and(
+      inArray(assetKeywords.assetId, uniqueAssetIds),
+      eq(assetKeywords.source, "adobe_similar_keywords"),
+      gte(assetKeywords.observedAt, cacheCutoff)
+    ))
+    .orderBy(desc(assetKeywords.observedAt), asc(assetKeywords.position));
+
+  const seenByAssetId = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const cached = cachedByAssetId.get(row.assetId) ?? [];
+    const seen = seenByAssetId.get(row.assetId) ?? new Set<string>();
+    if (seen.has(row.normalizedKeyword) || cached.length >= 200) continue;
+    seen.add(row.normalizedKeyword);
+    seenByAssetId.set(row.assetId, seen);
+    cached.push({
+      keyword: row.keyword,
+      normalizedKeyword: row.normalizedKeyword,
+      source: row.source,
+      position: row.position
+    });
+    cachedByAssetId.set(row.assetId, cached);
+  }
+
+  for (const cached of cachedByAssetId.values()) {
+    cached.sort((left, right) => left.position - right.position);
+  }
+  return cachedByAssetId;
+}
+
+export async function loadRecentCachedKeywords(
+  assetIds: string[]
+): Promise<Map<string, PersistedKeywordRow[]>> {
+  try {
+    return await readRecentCachedKeywords(getDatabase(), assetIds);
+  } catch {
+    // Cache is an optimization only. Live extraction remains the fallback.
+    return new Map();
+  }
+}
 
 export async function persistSuggestions(
   researchRunId: string,
@@ -201,67 +389,113 @@ export async function collectAndPersistAssetKeywords(
   researchRunId: string,
   item: CollectedAsset,
   navigationTimeout: number,
-  selectorTimeout: number
-): Promise<"success" | "empty" | "failed"> {
-  const database = getDatabase();
+  selectorTimeout: number,
+  options: {
+    openMode?: "card" | "next";
+    keepPanelOpen?: boolean;
+    cachedKeywords?: PersistedKeywordRow[];
+    initialPanelTimeout?: number;
+    onPanelOpenFailure?: () => void;
+    onPanelReady?: () => void;
+  } = {}
+): Promise<"success" | "empty" | "cached" | "failed"> {
   const assetId = makeStableId("asset", "adobe_stock", item.externalId);
   let responseStatus: number | null = null;
+  let preservePanel = options.keepPanelOpen === true;
 
   try {
-    const response = await page.goto(item.assetUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: navigationTimeout
-    });
-    const httpStatus = response?.status() ?? null;
-    responseStatus = httpStatus;
-    const initialDiagnostics = await getPageDiagnostics(page, httpStatus);
-    if (httpStatus === 404 || /\/404(?:$|[?#])/.test(initialDiagnostics.url)) {
-      throw new CrawlerStageError(
-        `Halaman detail asset tidak ditemukan (HTTP ${httpStatus ?? "unknown"}): ${initialDiagnostics.url}`,
-        "asset_not_found"
-      );
+    const cachedKeywords = options.cachedKeywords
+      ?? (await loadRecentCachedKeywords([assetId])).get(assetId)
+      ?? [];
+    if (cachedKeywords.length > 0) {
+      preservePanel = false;
+      await closeAdobeDetailPanel(page, selectorTimeout);
+      await persistAssetKeywordRows(researchRunId, assetId, cachedKeywords);
+      return "cached";
     }
 
+    // Adobe opens the asset detail as an in-page panel when a result card is
+    // clicked. Keep the search page alive so its challenge/session and result
+    // state are reused for every asset.
+    let panelReady = false;
+    const initialPanelTimeout = Math.min(
+      navigationTimeout,
+      options.initialPanelTimeout ?? navigationTimeout
+    );
+
+    const openCardPanel = async (timeout: number): Promise<boolean> => {
+      try {
+        await closeAdobeDetailPanel(page, selectorTimeout);
+        await clickAdobeAssetCard(page, item, timeout);
+        return await waitForAdobeAssetPanel(page, item.externalId, timeout);
+      } catch {
+        return false;
+      }
+    };
+
+    if (options.openMode === "next") {
+      const nextButton = page.locator("button.js-details-next-button").first();
+      if (await nextButton.count()) {
+        await nextButton.click({ timeout: initialPanelTimeout }).catch(() => undefined);
+        panelReady = await waitForAdobeAssetPanel(page, item.externalId, initialPanelTimeout);
+      }
+    } else {
+      panelReady = await openCardPanel(initialPanelTimeout);
+    }
+
+    // The result list can be re-rendered while the detail panel is changing.
+    // If the blocked attempt cannot open the exact asset panel, switch to the
+    // normal resource policy and retry once before reporting a failure.
+    if (!panelReady) {
+      options.onPanelOpenFailure?.();
+      await appendResearchEvent(
+        researchRunId,
+        "warning",
+        "keyword_detail_panel_retry",
+        `Panel detail asset ${item.externalId} diulang dengan resource normal`,
+        { assetId, initialPanelTimeout }
+      );
+      panelReady = await openCardPanel(navigationTimeout);
+    }
+
+    if (!panelReady) {
+      const diagnostics = await getPageDiagnostics(page, responseStatus);
+      if (/\/404(?:$|[?#])/.test(diagnostics.url)) {
+        throw new CrawlerStageError(
+          `Panel detail asset tidak ditemukan: ${diagnostics.url}`,
+          "asset_not_found"
+        );
+      }
+      throw new CrawlerStageError(
+        `Panel detail asset ${item.externalId} tidak terbuka pada ${diagnostics.url}`,
+        "selector_timeout"
+      );
+    }
+    options.onPanelReady?.();
     const keywordSelectorFound = await page
       .waitForSelector('[data-t="keywords-section"]', { timeout: selectorTimeout })
       .then(() => true)
       .catch(() => false);
-    const diagnostics = await getPageDiagnostics(page, httpStatus);
+    if (keywordSelectorFound) {
+      await page
+        .waitForFunction(hasAdobeKeywordRows, undefined, { timeout: selectorTimeout })
+        .catch(() => undefined);
+    }
 
-    await page.waitForTimeout(500);
+    const keywordRows = await page.evaluate(extractAdobeKeywordRows);
 
-    const keywordRows = await page.evaluate(() =>
-      [...document.querySelectorAll(
-        '[data-t="keywords-section"] [data-t^="similar-keyword-item-"]'
-      )]
-        .map((element) => (element.getAttribute("aria-label") || element.textContent || "").trim())
-        .filter((keyword) => keyword && !/^\d+$/.test(keyword))
-        .map((keyword, index) => ({ keyword, position: index + 1 }))
-    );
-
-    const keywordValues = keywordRows.map((row) => {
-      const normalizedKeyword = normalizeKeyword(row.keyword);
-      return {
-        id: makeStableId(
-          "asset-keyword",
-          researchRunId,
-          assetId,
-          normalizedKeyword,
-          "adobe_similar_keywords"
-        ),
-        researchRunId,
-        assetId,
+    await persistAssetKeywordRows(
+      researchRunId,
+      assetId,
+      keywordRows.map((row) => ({
         keyword: row.keyword,
-        normalizedKeyword,
+        normalizedKeyword: normalizeKeyword(row.keyword),
         source: "adobe_similar_keywords",
         position: row.position
-      };
-    });
-
-    for (const batch of chunks(keywordValues)) {
-      await database.insert(assetKeywords).values(batch).onConflictDoNothing();
-    }
+      }))
+    );
     if (!keywordRows.length) {
+      const diagnostics = await getPageDiagnostics(page, responseStatus);
       await appendResearchEvent(
         researchRunId,
         "warning",
@@ -272,6 +506,7 @@ export async function collectAndPersistAssetKeywords(
     }
     return keywordRows.length ? "success" : "empty";
   } catch (error) {
+    preservePanel = false;
     const diagnostics = await getPageDiagnostics(page, responseStatus);
     const failureType = classifyFailure(error, diagnostics);
     await appendResearchEvent(
@@ -283,6 +518,10 @@ export async function collectAndPersistAssetKeywords(
     );
     // Detail keyword enrichment is optional per asset. Search metadata remains valid.
     return "failed";
+  } finally {
+    // Also clean up after a partial panel failure so the next asset can be
+    // clicked from the search results without inheriting stale detail state.
+    if (!preservePanel) await closeAdobeDetailPanel(page, selectorTimeout);
   }
 }
 

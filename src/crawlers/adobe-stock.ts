@@ -6,6 +6,7 @@ import { researchRuns } from "../db/schema";
 import {
   appendResearchEvent,
   getResearchRun,
+  makeStableId,
   type ResearchMode
 } from "../services/research.service";
 import {
@@ -31,12 +32,16 @@ import {
 } from "./adobe-stock.core";
 import { collectSearchResults } from "./adobe-stock.search";
 import { collectSuggestions } from "./adobe-stock.suggestions";
+import { installAdobeResourcePolicy, type AdobeResourcePolicy } from "./adobe-stock.resources";
 import {
   collectAndPersistAssetKeywords,
+  closeAdobeDetailPanel,
   loadResumeState,
+  loadRecentCachedKeywords,
   persistFailedSearch,
   persistSearch,
   persistSuggestions,
+  type PersistedKeywordRow,
   type ResearchHooks,
   withRetry
 } from "./adobe-stock.persistence";
@@ -113,6 +118,8 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
   const autocompletePrefixLimit = mode === "fast" ? 5 : 27;
   const navigationTimeout = mode === "fast" ? 20_000 : 30_000;
   const selectorTimeout = mode === "fast" ? 8_000 : 15_000;
+  const detailNavigationTimeout = Math.min(navigationTimeout, env.researchDetailNavigationTimeoutMs);
+  const detailSelectorTimeout = Math.min(selectorTimeout, env.researchDetailSelectorTimeoutMs);
   const keywordDetailLimitPerSort = mode === "fast" ? 1 : mode === "primary" ? 50 : Number.POSITIVE_INFINITY;
 
   let requestHandled = false;
@@ -164,13 +171,20 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
   const executeScrapingSession = async (page: Page) => {
     activePages.add(page);
+    let resourcePolicy: AdobeResourcePolicy | null = null;
     try {
       // CloakBrowser already patches the fingerprint at the browser level.
       // The legacy page-level patches can overwrite those values and make
       // the initial Adobe/DataDome session challenge less reliable.
       if (env.crawlerBrowser !== "cloak") await applyStealthScripts(page);
+      if (env.crawlerBlockHeavyResources) {
+        resourcePolicy = await installAdobeResourcePolicy(page);
+      }
       requestHandled = true;
-      const scrapingLocation = await collectScrapingLocation(page);
+      const scrapingLocation = await collectScrapingLocation(
+        page,
+        selectedProxy ? `proxy:${selectedProxy.id}` : "direct"
+      );
       const locationLabel = [
         scrapingLocation.city,
         scrapingLocation.region,
@@ -301,35 +315,39 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
       const enrichedAssetIds = resumeState.enrichedAssetIds;
       let keywordSuccess = 0;
       let keywordEmpty = 0;
+      let keywordCached = 0;
       let keywordFailed = 0;
-      const keywordPageRotationLimit = 20;
-      let keywordPage: Page | null = null;
-      let keywordPageUses = 0;
-      const getKeywordPage = async (): Promise<Page> => {
-        if (keywordPage && !keywordPage.isClosed() && keywordPageUses < keywordPageRotationLimit) {
-          return keywordPage;
+      const cachedKeywordRowsByAssetId = new Map<string, PersistedKeywordRow[]>();
+      const checkedKeywordCacheAssetIds = new Set<string>();
+
+      const preloadKeywordCache = async (items: CollectedAsset[], target: number) => {
+        const assetIds = items
+          .slice(0, target)
+          .filter((item) => !enrichedAssetIds.has(item.externalId))
+          .map((item) => makeStableId("asset", "adobe_stock", item.externalId));
+        const missingAssetIds = assetIds.filter((assetId) => !checkedKeywordCacheAssetIds.has(assetId));
+        if (!missingAssetIds.length) return;
+
+        const cachedRows = await loadRecentCachedKeywords(missingAssetIds);
+        for (const assetId of missingAssetIds) {
+          checkedKeywordCacheAssetIds.add(assetId);
+          cachedKeywordRowsByAssetId.set(assetId, cachedRows.get(assetId) ?? []);
         }
-        if (keywordPage) {
-          activePages.delete(keywordPage);
-          await keywordPage.close().catch(() => undefined);
-        }
-        keywordPage = await page.context().newPage();
-        activePages.add(keywordPage);
-        // CloakBrowser patches the browser context itself. Reapplying the
-        // legacy page-level patches on detail pages can interfere with the
-        // Adobe challenge/session established by the bootstrap page.
-        if (env.crawlerBrowser !== "cloak") await applyStealthScripts(keywordPage);
-        keywordPageUses = 0;
-        return keywordPage;
       };
+
       const enrichAssetsForSort = async (items: CollectedAsset[], sortMode: SortMode) => {
         const target = Math.min(
           items.length,
           Number.isFinite(keywordDetailLimitPerSort) ? keywordDetailLimitPerSort : items.length
         );
+        await preloadKeywordCache(items, target);
         let selected = 0;
         let fetched = 0;
         let lastReportedFetched = 0;
+        let lastAssetDurationMs: number | null = null;
+        const enrichmentStartedAt = Date.now();
+        let detailPanelOpen = false;
+        let previousPanelItemIndex: number | null = null;
 
         if (target > 0) {
           await appendResearchEvent(
@@ -341,72 +359,110 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
           );
         }
 
-        for (const item of items) {
-          throwIfResearchCancelled(cancellationSignal);
-          if (selected >= keywordDetailLimitPerSort) break;
-          selected += 1;
-          if (enrichedAssetIds.has(item.externalId)) continue;
-          fetched += 1;
-          const detailPage = await getKeywordPage();
-          keywordPageUses += 1;
-          const status = await collectAndPersistAssetKeywords(
-            detailPage,
-            researchRunId,
-            item,
-            navigationTimeout,
-            selectorTimeout
-          );
-          if (status === "success") keywordSuccess += 1;
-          if (status === "empty") keywordEmpty += 1;
-          if (status === "failed") keywordFailed += 1;
-          if (status !== "failed") enrichedAssetIds.add(item.externalId);
-          if (status === "failed") {
-            if (keywordPage) {
-              activePages.delete(keywordPage);
-              await keywordPage.close().catch(() => undefined);
+        try {
+          for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+            const item = items[itemIndex];
+            throwIfResearchCancelled(cancellationSignal);
+            if (selected >= keywordDetailLimitPerSort) break;
+            selected += 1;
+            if (enrichedAssetIds.has(item.externalId)) {
+              if (detailPanelOpen) {
+                await closeAdobeDetailPanel(page, detailSelectorTimeout);
+                detailPanelOpen = false;
+              }
+              previousPanelItemIndex = null;
+              continue;
             }
-            keywordPage = null;
-            keywordPageUses = 0;
-          }
-
-          if (fetched - lastReportedFetched >= 5 || fetched === target) {
-            lastReportedFetched = fetched;
-            await appendResearchEvent(
+            fetched += 1;
+            const assetStartedAt = Date.now();
+            const useNextPanelAsset = detailPanelOpen && previousPanelItemIndex === itemIndex - 1;
+            const assetId = makeStableId("asset", "adobe_stock", item.externalId);
+            const cachedKeywords = cachedKeywordRowsByAssetId.get(assetId) ?? [];
+            if (cachedKeywords.length > 0) {
+              resourcePolicy?.setSearchMode();
+            } else {
+              // Search cards are already collected at this point. Arm the
+              // lightweight detail policy before opening the panel; if the
+              // panel does not appear quickly, the callback switches back to
+              // normal resources for a safe retry.
+              resourcePolicy?.setDetailMode();
+            }
+            const status = await collectAndPersistAssetKeywords(
+              page,
               researchRunId,
-              "info",
-              "keyword_enrichment_progress",
-              `Keyword detail ${sortMode}: ${fetched}/${target} asset diproses`,
+              item,
+              detailNavigationTimeout,
+              detailSelectorTimeout,
               {
-                selected,
-                fetched,
-                target,
-                sortMode,
-                success: keywordSuccess,
-                empty: keywordEmpty,
-                failed: keywordFailed,
-                currentAssetId: item.externalId
+                openMode: useNextPanelAsset ? "next" : "card",
+                keepPanelOpen: true,
+                cachedKeywords,
+                initialPanelTimeout: 8_000,
+                onPanelOpenFailure: () => resourcePolicy?.setSearchMode(),
+                onPanelReady: () => resourcePolicy?.setDetailMode()
               }
             );
+            lastAssetDurationMs = Date.now() - assetStartedAt;
+            if (status === "success") keywordSuccess += 1;
+            if (status === "empty") keywordEmpty += 1;
+            if (status === "cached") {
+              keywordSuccess += 1;
+              keywordCached += 1;
+            }
+            if (status === "failed") keywordFailed += 1;
+            if (status !== "failed") {
+              enrichedAssetIds.add(item.externalId);
+              detailPanelOpen = status !== "cached";
+              previousPanelItemIndex = status === "cached" ? null : itemIndex;
+            } else {
+              detailPanelOpen = false;
+              previousPanelItemIndex = null;
+            }
+
+            if (fetched - lastReportedFetched >= 5 || fetched === target) {
+              lastReportedFetched = fetched;
+              await appendResearchEvent(
+                researchRunId,
+                "info",
+                "keyword_enrichment_progress",
+                `Keyword detail ${sortMode}: ${fetched}/${target} asset diproses`,
+                {
+                  selected,
+                  fetched,
+                  target,
+                  sortMode,
+                  success: keywordSuccess,
+                  empty: keywordEmpty,
+                  cached: keywordCached,
+                  failed: keywordFailed,
+                  currentAssetId: item.externalId,
+                  lastAssetDurationMs,
+                  elapsedMs: Date.now() - enrichmentStartedAt
+                }
+              );
+            }
+            throwIfResearchCancelled(cancellationSignal);
           }
-          throwIfResearchCancelled(cancellationSignal);
+        } finally {
+          if (detailPanelOpen) {
+            await closeAdobeDetailPanel(page, detailSelectorTimeout);
+            detailPanelOpen = false;
+          }
         }
         return { selected, fetched, sortMode };
       };
-      try {
-        for (const suggestion of queryTargets) {
+      for (const suggestion of queryTargets) {
           const queryLabel = suggestion.suggestion || "Page One";
           for (const sortMode of sortModes) {
           await ensureResearchActive();
-          const latestRun = await getResearchRun(researchRunId);
-          if (!latestRun || latestRun.status === "cancelled") {
-            throw new ResearchCancelledError();
-          }
 
           const queryKey = `${suggestion.suggestion}\u001f${sortMode}`;
           if (resumeState.completedKeys.has(queryKey)) {
             const resumedAssets = resumeState.assetsByQueryAndSort.get(queryKey) ?? [];
             if (resumedAssets.length) {
+              resourcePolicy?.setSearchMode();
               await enrichAssetsForSort(resumedAssets, sortMode);
+              resourcePolicy?.setSearchMode();
             }
             await appendResearchEvent(
               researchRunId,
@@ -429,6 +485,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
 
           let searchResult;
           try {
+            resourcePolicy?.setSearchMode();
             searchResult = await withRetry(
               researchRunId,
               `Query ${sortMode} ${queryLabel}`,
@@ -442,7 +499,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
                 navigationTimeout,
                 selectorTimeout
               ),
-              2,
+              env.researchQueryMaxAttempts,
               () => getPageDiagnostics(page),
               cancellationSignal
             );
@@ -489,6 +546,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             }
           );
 
+          resourcePolicy?.setSearchMode();
           const enrichment = await enrichAssetsForSort(searchResult.assets, sortMode);
           if (enrichment.selected > 0) {
             await appendResearchEvent(
@@ -502,6 +560,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
                 sortMode,
                 success: keywordSuccess,
                 empty: keywordEmpty,
+                cached: keywordCached,
                 failed: keywordFailed
               }
             );
@@ -515,24 +574,19 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
               fetched: enrichment.fetched,
               success: keywordSuccess,
               empty: keywordEmpty,
+              cached: keywordCached,
               failed: keywordFailed
             }
           );
 
-          await randomJitter(700, 1800);
+          resourcePolicy?.setSearchMode();
+          await randomJitter(300, 800);
           await ensureResearchActive();
           }
-        }
-      } finally {
-        const pageToClose: Page | null = keywordPage as Page | null;
-        keywordPage = null;
-        if (pageToClose) {
-          activePages.delete(pageToClose);
-          await pageToClose.close().catch(() => undefined);
-        }
       }
       requestSucceeded = true;
     } finally {
+      await resourcePolicy?.dispose();
       activePages.delete(page);
     }
     };
@@ -620,6 +674,7 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
     const crawler = new PlaywrightCrawler({
       maxConcurrency: 1,
       maxRequestsPerCrawl: 1,
+      maxRequestRetries: env.researchCrawlerRequestRetries,
       useSessionPool: false,
       requestHandlerTimeoutSecs: 900,
       launchContext: {
