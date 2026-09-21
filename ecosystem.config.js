@@ -26,7 +26,9 @@ module.exports = {
         DISPLAY: ":99",
         CRAWLER_BROWSER: "cloak",
         PLAYWRIGHT_HEADLESS: "true",
-        CLOAKBROWSER_PROFILE_DIR: "storage/cloak-profile",
+        // Reuse the profile that previously passed Adobe's geo/DataDome
+        // bootstrap. CDP is disabled; Cloak owns this profile now.
+        CLOAKBROWSER_PROFILE_DIR: "/home/ubuntu/snap/chromium/common/adobe-profile",
         CLOAKBROWSER_HUMANIZE: "false"
       }
     }

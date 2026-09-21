@@ -5,13 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=ubuntu
 WorkingDirectory=/home/ubuntu/micro-research-backend
 Environment=NODE_ENV=production
 Environment=HOST=0.0.0.0
 Environment=PORT=3315
 Environment=DISPLAY=:99
-Environment=PLAYWRIGHT_HEADLESS=false
+Environment=HOME=/home/ubuntu
+Environment=PLAYWRIGHT_HEADLESS=true
 ExecStart=/usr/bin/pm2-runtime /home/ubuntu/micro-research-backend/ecosystem.config.js --env production
 Restart=always
 RestartSec=5
