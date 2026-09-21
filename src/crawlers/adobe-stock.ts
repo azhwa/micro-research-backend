@@ -315,13 +315,32 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
         }
         keywordPage = await page.context().newPage();
         activePages.add(keywordPage);
-        await applyStealthScripts(keywordPage);
+        // CloakBrowser patches the browser context itself. Reapplying the
+        // legacy page-level patches on detail pages can interfere with the
+        // Adobe challenge/session established by the bootstrap page.
+        if (env.crawlerBrowser !== "cloak") await applyStealthScripts(keywordPage);
         keywordPageUses = 0;
         return keywordPage;
       };
       const enrichAssetsForSort = async (items: CollectedAsset[], sortMode: SortMode) => {
+        const target = Math.min(
+          items.length,
+          Number.isFinite(keywordDetailLimitPerSort) ? keywordDetailLimitPerSort : items.length
+        );
         let selected = 0;
         let fetched = 0;
+        let lastReportedFetched = 0;
+
+        if (target > 0) {
+          await appendResearchEvent(
+            researchRunId,
+            "info",
+            "keyword_enrichment_started",
+            `Pengambilan keyword detail dimulai untuk ${target} asset ${sortMode}`,
+            { target, sortMode }
+          );
+        }
+
         for (const item of items) {
           throwIfResearchCancelled(cancellationSignal);
           if (selected >= keywordDetailLimitPerSort) break;
@@ -348,6 +367,26 @@ export async function runAdobeResearch(researchRunId: string, hooks: ResearchHoo
             }
             keywordPage = null;
             keywordPageUses = 0;
+          }
+
+          if (fetched - lastReportedFetched >= 5 || fetched === target) {
+            lastReportedFetched = fetched;
+            await appendResearchEvent(
+              researchRunId,
+              "info",
+              "keyword_enrichment_progress",
+              `Keyword detail ${sortMode}: ${fetched}/${target} asset diproses`,
+              {
+                selected,
+                fetched,
+                target,
+                sortMode,
+                success: keywordSuccess,
+                empty: keywordEmpty,
+                failed: keywordFailed,
+                currentAssetId: item.externalId
+              }
+            );
           }
           throwIfResearchCancelled(cancellationSignal);
         }
