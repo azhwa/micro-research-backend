@@ -24,11 +24,12 @@ module.exports = {
         HOST: "0.0.0.0",
         PORT: 3315,
         DISPLAY: ":99",
-        CRAWLER_BROWSER: "cloak",
+        CRAWLER_BROWSER: "cdp",
         // Crawlee otherwise uses 25% of host RAM as its local memory budget.
         // Reserve a controlled 5 GB budget for the browser crawler instead.
         CRAWLEE_MEMORY_MBYTES: "5120",
         PLAYWRIGHT_HEADLESS: "true",
+        PLAYWRIGHT_CDP_URL: "http://127.0.0.1:9222",
         // Reuse the profile that previously passed Adobe's geo/DataDome
         // bootstrap. CDP is disabled; Cloak owns this profile now.
         CLOAKBROWSER_PROFILE_DIR: "/home/ubuntu/snap/chromium/common/adobe-profile",
