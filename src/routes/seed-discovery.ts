@@ -13,6 +13,7 @@ interface CreateBody {
   locale?: unknown;
   count?: unknown;
   model?: unknown;
+  forceNew?: unknown;
 }
 
 function authOrThrow(request: { auth: import("../auth").AuthContext | null }) {
@@ -34,7 +35,8 @@ export async function seedDiscoveryRoutes(app: FastifyInstance): Promise<void> {
             assetType: { type: "string", enum: ["images", "videos"] },
             locale: { type: "string", minLength: 1, maxLength: 20 },
             count: { type: "integer", minimum: 1, maximum: 50 },
-            model: { type: "string", minLength: 1, maxLength: 120 }
+            model: { type: "string", minLength: 1, maxLength: 120 },
+            forceNew: { type: "boolean" }
           }
         }
       }
@@ -47,7 +49,8 @@ export async function seedDiscoveryRoutes(app: FastifyInstance): Promise<void> {
       assetType: typeof request.body?.assetType === "string" ? request.body.assetType : undefined,
       locale: typeof request.body?.locale === "string" ? request.body.locale : undefined,
       count: typeof request.body?.count === "number" ? request.body.count : undefined,
-      model: typeof request.body?.model === "string" ? request.body.model : undefined
+      model: typeof request.body?.model === "string" ? request.body.model : undefined,
+      forceNew: request.body?.forceNew === true
     });
     if (!result) {
       return reply.status(400).send({
