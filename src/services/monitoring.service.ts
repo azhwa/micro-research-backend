@@ -23,7 +23,9 @@ function processCpuPercent(): number {
 }
 
 async function getCdpHealth() {
-  if (!env.playwrightCdpUrl) return { configured: false, reachable: false, browserVersion: null as string | null };
+  if (env.crawlerBrowser !== "cdp" || !env.playwrightCdpUrl) {
+    return { configured: false, reachable: false, browserVersion: null as string | null };
+  }
   try {
     const response = await fetch(new URL("/json/version", env.playwrightCdpUrl), {
       signal: AbortSignal.timeout(1_500)
@@ -105,6 +107,11 @@ export async function getMonitoringSnapshot() {
         processRssMb: Math.round(process.memoryUsage().rss / 1_048_576)
       },
       uptimeSeconds: Math.round(os.uptime()),
+      browser: {
+        engine: env.crawlerBrowser,
+        headless: env.playwrightHeadless,
+        profileDir: env.crawlerBrowser === "cloak" ? env.cloakBrowserProfileDir : null
+      },
       cdp
     }
   };

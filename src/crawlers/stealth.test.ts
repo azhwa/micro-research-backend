@@ -1,33 +1,43 @@
-import { chromium } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import { applyStealthScripts } from "./adobe-stock";
+import { buildCloakLaunchOptions, cloakBrowserProfilePath } from "./cloakbrowser";
 import { env } from "../config/env";
 
 async function runStealthAudit() {
-  console.log("=== Starting Playwright Stealth Audit ===");
+  console.log(`=== Starting ${env.crawlerBrowser} Stealth Audit ===`);
   console.log(`Mode: ${env.playwrightHeadless ? "headless" : "headed"}`);
-  if (env.playwrightCdpUrl) {
+  if (env.crawlerBrowser === "cdp" && env.playwrightCdpUrl) {
     console.log(`CDP Target: ${env.playwrightCdpUrl}`);
   }
 
-  const browser = env.playwrightCdpUrl
-    ? await chromium.connectOverCDP(env.playwrightCdpUrl)
-    : await chromium.launch({
-        headless: env.playwrightHeadless,
-        args: [
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--no-sandbox",
-          "--disable-infobars",
-          "--disable-blink-features=AutomationControlled",
-          "--window-size=1920,1080"
-        ],
-        ignoreDefaultArgs: ["--enable-automation"]
-      });
-
-  try {
-    const context = browser.contexts()[0] || (await browser.newContext({
+  let browser: Browser | undefined;
+  let context: BrowserContext;
+  if (env.crawlerBrowser === "cloak") {
+    context = await chromium.launchPersistentContext(
+      cloakBrowserProfilePath(),
+      await buildCloakLaunchOptions()
+    );
+  } else {
+    browser = env.crawlerBrowser === "cdp"
+      ? await chromium.connectOverCDP(env.playwrightCdpUrl)
+      : await chromium.launch({
+          headless: env.playwrightHeadless,
+          args: [
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1920,1080"
+          ],
+          ignoreDefaultArgs: ["--enable-automation"]
+        });
+    context = browser.contexts()[0] || (await browser.newContext({
       viewport: { width: 1920, height: 1080 }
     }));
+  }
+
+  try {
     const page = await context.newPage();
     await applyStealthScripts(page);
 
@@ -106,7 +116,8 @@ async function runStealthAudit() {
 
     await page.close();
   } finally {
-    await browser.close();
+    if (env.crawlerBrowser !== "cdp") await context.close();
+    if (browser) await browser.close();
   }
 }
 
